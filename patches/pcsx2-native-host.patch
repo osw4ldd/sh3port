@@ -1,0 +1,127 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b0c3945..96572be 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -63,6 +63,11 @@ if(ENABLE_TESTS)
+ 	add_subdirectory(tests/ctest)
+ endif()
+ 
++# ps2native host (natively recompiled PS2 programs on top of the PCSX2 core)
++if(PS2NATIVE_HOST_DIR)
++	add_subdirectory(${PS2NATIVE_HOST_DIR} ps2native-host)
++endif()
++
+ # gsrunner
+ if(ENABLE_GSRUNNER)
+ 	add_subdirectory(pcsx2-gsrunner)
+diff --git a/pcsx2/VMManager.cpp b/pcsx2/VMManager.cpp
+index f6fda22..5269221 100644
+--- a/pcsx2/VMManager.cpp
++++ b/pcsx2/VMManager.cpp
+@@ -210,6 +210,21 @@ static const char* s_discord_presence_large_image_text = "PCSX2 PS2 Emulator";
+ // Making GSDumpReplayer.h dependent on R5900.h is a no-no, since the GS uses it.
+ extern R5900cpu GSDumpReplayerCpu;
+ 
++// ps2native host mode (see VMManager::SetNativeHostCPUs).
++static R5900cpu* s_native_ee_cpu = nullptr;
++static R3000Acpu* s_native_iop_cpu = nullptr;
++
++void VMManager::SetNativeHostCPUs(R5900cpu* ee, R3000Acpu* iop)
++{
++	s_native_ee_cpu = ee;
++	s_native_iop_cpu = iop;
++}
++
++bool VMManager::IsNativeHost()
++{
++	return s_native_ee_cpu != nullptr;
++}
++
+ bool VMManager::PerformEarlyHardwareChecks(const char** error)
+ {
+ #define COMMON_DOWNLOAD_MESSAGE "PCSX2 builds can be downloaded from https://pcsx2.net/downloads/"
+@@ -732,7 +747,7 @@ void VMManager::WarnAboutUnconfiguredController()
+ 
+ void VMManager::ApplyGameFixes()
+ {
+-	if (!HasBootedELF() && !GSDumpReplayer::IsReplayingDump())
++	if (!HasBootedELF() && !GSDumpReplayer::IsReplayingDump() && !IsNativeHost())
+ 	{
+ 		// Instant DMA needs to be on for this BIOS (font rendering is broken without it, possible cache issues).
+ 		EmuConfig.Gamefixes.InstantDMAHack = true;
+@@ -1454,8 +1469,8 @@ VMBootResult VMManager::Initialize(const VMBootParameters& boot_params, Error* e
+ 
+ 	ScopedGuard close_cdvd_files(&CDVDsys_ClearFiles);
+ 
+-	// Playing GS dumps don't need a BIOS.
+-	if (!GSDumpReplayer::IsReplayingDump())
++	// Playing GS dumps (and natively recompiled programs with an HLE IOP) don't need a BIOS.
++	if (!GSDumpReplayer::IsReplayingDump() && !(IsNativeHost() && s_native_iop_cpu))
+ 	{
+ 		Console.WriteLn("Loading BIOS...");
+ 		if (!LoadBIOS())
+@@ -1513,7 +1528,7 @@ VMBootResult VMManager::Initialize(const VMBootParameters& boot_params, Error* e
+ 	s_fast_boot_requested =
+ 		(boot_params.fast_boot.value_or(static_cast<bool>(EmuConfig.EnableFastBoot)) || !s_elf_override.empty()) &&
+ 		(CDVDsys_GetSourceType() != CDVD_SourceType::NoDisc || !s_elf_override.empty()) &&
+-		!GSDumpReplayer::IsReplayingDump();
++		!GSDumpReplayer::IsReplayingDump() && !IsNativeHost();
+ 
+ 	if (!s_elf_override.empty())
+ 	{
+@@ -1539,7 +1554,7 @@ VMBootResult VMManager::Initialize(const VMBootParameters& boot_params, Error* e
+ 	// Why do we need the boot param? Because we need some way of telling BootSystem() that
+ 	// the user allowed HC mode to be disabled, because otherwise we'll ResetHardcoreMode()
+ 	// and send ourselves into an infinite loop.
+-	if (boot_params.disable_achievements_hardcore_mode || GSDumpReplayer::IsReplayingDump())
++	if (boot_params.disable_achievements_hardcore_mode || GSDumpReplayer::IsReplayingDump() || IsNativeHost())
+ 		Achievements::DisableHardcoreMode();
+ 	else
+ 		Achievements::ResetHardcoreMode(true);
+@@ -2312,7 +2327,9 @@ void VMManager::ResetFrameLimiter()
+ 
+ void VMManager::Internal::Throttle(bool vsync_start)
+ {
+-	if (s_target_speed == 0.0f || s_use_vsync_for_timing)
++	// ps2native: the native EE runtime paces the machine to host real time
++	// itself; sleeping here would stall the natively running game code.
++	if (s_target_speed == 0.0f || s_use_vsync_for_timing || IsNativeHost())
+ 		return;
+ 
+ 	const u64 uExpectedEnd =
+@@ -2758,6 +2775,13 @@ void VMManager::UpdateCPUImplementations()
+ #ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
+ 	Cpu = CHECK_EEREC ? &recCpu : &intCpu;
+ 	psxCpu = CHECK_IOPREC ? &psxRec : &psxInt;
++	if (IsNativeHost())
++	{
++		// A null IOP provider means: run the real IOP (requires a BIOS).
++		Cpu = s_native_ee_cpu;
++		if (s_native_iop_cpu)
++			psxCpu = s_native_iop_cpu;
++	}
+ 
+ 	CpuVU0 = EmuConfig.Cpu.Recompiler.EnableVU0 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU0) : static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
+ 	CpuVU1 = EmuConfig.Cpu.Recompiler.EnableVU1 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU1) : static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
+diff --git a/pcsx2/VMManager.h b/pcsx2/VMManager.h
+index 682f613..4dec150 100644
+--- a/pcsx2/VMManager.h
++++ b/pcsx2/VMManager.h
+@@ -67,8 +67,17 @@ using VMBootHardcoreDisableCallback = std::function<void(std::string reason, VMB
+ /// asynchronously after the user has been prompted to disable hardcore mode.
+ using VMBootDoneCallback = std::function<void(VMBootResult result, const Error& error)>;
+ 
++struct R5900cpu;
++struct R3000Acpu;
++
+ namespace VMManager
+ {
++	/// ps2native: an embedding application supplies the EE (and IOP) CPU
++	/// implementation.  With iop == nullptr the real IOP runs from the BIOS;
++	/// otherwise the VM boots without a BIOS.
++	void SetNativeHostCPUs(R5900cpu* ee, R3000Acpu* iop);
++	bool IsNativeHost();
++
+ 	/// The number of usable save state slots.
+ 	static constexpr s32 NUM_SAVE_STATE_SLOTS = 10;
+ 

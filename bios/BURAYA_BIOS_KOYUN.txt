@@ -1,0 +1,3 @@
+PS2 BIOS dosyanizi (kendi konsolunuzdan alinmis .bin) bu klasore koyun.
+ps2native bu klasordeki BIOS'u otomatik bulur.
+Bu klasordeki dosyalar uretilen oyun exe'lerine gomulmez.

@@ -1,0 +1,60 @@
+# ---------------------------------------------------------------------------
+# Never commit console firmware, game data or personal saves
+# ---------------------------------------------------------------------------
+bios/*
+!bios/BURAYA_BIOS_KOYUN.txt
+*.iso
+*.chd
+*.cso
+*.zso
+*.mec
+*.nvm
+*.ps2
+memcards/
+# ELF images extracted from discs (SLUS_206.22 and friends)
+SLUS_*
+SLES_*
+SCUS_*
+SCES_*
+SLPM_*
+SLPS_*
+
+# Launcher artwork (Konami / fan art) - see launcher/assets/README.md
+launcher/assets/*.jpg
+launcher/assets/*.png
+launcher/assets/*.ico
+
+# ---------------------------------------------------------------------------
+# Build outputs (also contain code generated from the game executable)
+# ---------------------------------------------------------------------------
+build/
+release/
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.lib
+*.exp
+*.obj
+*.o
+*.a
+*.spec
+
+# ---------------------------------------------------------------------------
+# Third-party trees fetched by scripts (see scripts/setup_pcsx2.bat)
+# ---------------------------------------------------------------------------
+third_party/
+tools/
+
+# ---------------------------------------------------------------------------
+# Python / editors / OS
+# ---------------------------------------------------------------------------
+__pycache__/
+*.pyc
+.venv/
+.vscode/
+.idea/
+*.log
+Thumbs.db
+desktop.ini
+.DS_Store
