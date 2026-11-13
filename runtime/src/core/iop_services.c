@@ -2,7 +2,7 @@
  * HLE IOP RPC services beyond fileio/iopheap/loadfile (see sif.c).
  *
  * Replies are what the real IOP answered in the LLE reference run
- * (PS2NATIVE_RPCLOG=1, see NATIVE_PLAN.md "Ölçülen RPC trafiği").
+ * (PS2NATIVE_RPCLOG=1, see NATIVE_PLAN.md "Measured RPC traffic").
  */
 #include "../internal.h"
 

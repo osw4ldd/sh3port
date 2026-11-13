@@ -2,7 +2,7 @@
 # Never commit console firmware, game data or personal saves
 # ---------------------------------------------------------------------------
 bios/*
-!bios/BURAYA_BIOS_KOYUN.txt
+!bios/PUT_YOUR_BIOS_HERE.txt
 *.iso
 *.chd
 *.cso
@@ -11,6 +11,9 @@ bios/*
 *.nvm
 *.ps2
 memcards/
+# Game-specific configuration and patches (function addresses, pnach code
+# patches) are provided by the user, not distributed - see games/README.md
+games/*/
 # ELF images extracted from discs (SLUS_206.22 and friends)
 SLUS_*
 SLES_*

@@ -1,0 +1,3 @@
+Put your PS2 BIOS dump (a .bin dumped from your own console) into this folder.
+The game finds the BIOS in this folder automatically.
+Files in this folder are never embedded into the generated game exe.

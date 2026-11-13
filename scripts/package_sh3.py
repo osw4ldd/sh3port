@@ -49,17 +49,17 @@ vibration=1
 README = """Silent Hill 3 - Native PC Port
 ==============================
 
-1. "Silent Hill 3.exe"yi çalıştırın.
-2. "Oyun dosyaları" sayfasında kendi Silent Hill 3 (ABD, SLUS-20622) disk
-   imajınızı (.iso) ve kendi PS2 konsolunuzdan aldığınız BIOS'u seçin.
-3. Grafik / Oyun ayarları / Kontroller sayfalarından ayarlarınızı yapın.
-4. "OYNA".
+1. Run "Silent Hill 3.exe".
+2. On the "Game files" page select your own Silent Hill 3 (USA, SLUS-20622)
+   disc image (.iso) and a BIOS dumped from your own PS2 console.
+3. Adjust the Graphics / Game settings / Controls pages.
+4. "PLAY".
 
-Tam ekran: Alt+Enter veya F11.
-Kayıtlar: bin\\memcards\\Mcd001.ps2 (launcher'dan yedeklenebilir).
-Sorun olursa: bin\\logs\\last_run.log
+Fullscreen: Alt+Enter or F11.
+Saves: bin\\memcards\\Mcd001.ps2 (can be backed up from the launcher).
+If something goes wrong: bin\\logs\\last_run.log
 
-Bu paket oyun dosyası veya BIOS içermez.
+This package contains no game files and no BIOS.
 """
 
 
