@@ -106,6 +106,9 @@ int kernel_in_handler;
 static void kernel_reschedule(void);
 static void maybe_preempt(void);
 
+/* Debugging aid for host-side I/O traces. */
+int kernel_thread_id(void);
+
 /* ---------------------------------------------------------- helpers */
 static ps2_thread *thread_get(int id)
 {
@@ -114,6 +117,11 @@ static ps2_thread *thread_get(int id)
     if (id < 0 || id >= MAX_THREADS || !threads[id] || !threads[id]->used)
         return NULL;
     return threads[id];
+}
+
+int kernel_thread_id(void)
+{
+    return kernel_in_handler ? -1 : (cur ? cur->id : 0);
 }
 
 static R5900 *alloc_ctx_thread(void)
@@ -357,8 +365,13 @@ void kernel_on_vblank(void)
     vblank_count++;
     /* Request the frame dump a few vblanks early: hardware renderers capture
      * it asynchronously at a later vsync. */
+    static int dump_lead;
+    if (!dump_lead) { /* PS2NATIVE_GSDUMP=N (debugging): leave time for an N-frame GS dump */
+        const char *env = getenv("PS2NATIVE_GSDUMP");
+        dump_lead = 3 + (env ? atoi(env) : 0);
+    }
     if (ps2_cfg.dump_frame[0] && ps2_cfg.max_frames && !frame_dumped &&
-        vblank_count + 3 >= (uint64_t)ps2_cfg.max_frames) {
+        vblank_count + (uint64_t)dump_lead >= (uint64_t)ps2_cfg.max_frames) {
         frame_dumped = 1;
         be_save_frame(ps2_cfg.dump_frame);
     }
@@ -464,6 +477,21 @@ void ps2_service(R5900 *c)
             ps2_log("state: thread %d at %08X (ra %08X) status %08X intc pending %08X dmac pending %03X handler %d",
                     cur ? cur->id : -1, cur ? cur->ctx.pc : 0, cur ? cur->ctx.r[31].UW[0] : 0, ps2_cop0[12], be_intc_pending(),
                     be_dmac_pending(), kernel_in_handler);
+            /* PS2NATIVE_PEEK=hex,hex: guest words printed with every report */
+            const char *pk = getenv("PS2NATIVE_PEEK");
+            if (pk) {
+                char line[256] = "";
+                int len = 0;
+                while (*pk && len < (int)sizeof line - 24) {
+                    char *end;
+                    unsigned long a = strtoul(pk, &end, 16);
+                    if (end == pk)
+                        break;
+                    len += snprintf(line + len, sizeof line - len, " [%08lX]=%08X", a, ps2_read32((uint32_t)a));
+                    pk = *end ? end + 1 : end;
+                }
+                ps2_log("peek:%s", line);
+            }
             be_report();
             for (int i = 1; i < MAX_THREADS; i++) {
                 ps2_thread *t = threads[i];

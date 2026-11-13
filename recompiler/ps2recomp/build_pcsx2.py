@@ -60,6 +60,15 @@ def package(bindir, log=print):
             shutil.copytree(src, bindir / sub, dirs_exist_ok=True)
     res_src = PCSX2 / "bin" / "resources"
     shutil.copytree(res_src, bindir / "resources", dirs_exist_ok=True)
+    # Full FFmpeg (same library majors as PCSX2's, which has no decoders):
+    # the native MPEG-2 decoding of FMVs (runtime/src/core/mpeg_native.c).
+    ff = sorted((PCSX2.parent.parent / "tools" / "ffmpeg").glob("ffmpeg-*-shared*/bin"))
+    if ff:
+        for dll in ff[-1].glob("*.dll"):
+            shutil.copy2(dll, bindir / dll.name)
+        log(f"FFmpeg decoders from {ff[-1].parent.name}")
+    else:
+        log("warning: tools/ffmpeg not found - native FMV decoding will be unavailable")
     log(f"packaged {n} DLLs + resources into {bindir}")
 
 

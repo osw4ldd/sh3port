@@ -9,6 +9,12 @@ set(PS2NATIVE_RUNTIME "${CMAKE_CURRENT_LIST_DIR}/../runtime")
 # Runtime core (C).  Compiled without PCSX2's flags; plain C11.
 add_library(ps2native-rt STATIC
 	"${PS2NATIVE_RUNTIME}/src/core/dispatch.c"
+	"${PS2NATIVE_RUNTIME}/src/core/dyn.c"
+	"${PS2NATIVE_RUNTIME}/src/core/iso.c"
+	"${PS2NATIVE_RUNTIME}/src/core/hle_iop.c"
+	"${PS2NATIVE_RUNTIME}/src/core/iop_services.c"
+	"${PS2NATIVE_RUNTIME}/src/core/hle_mpeg.c"
+	"${PS2NATIVE_RUNTIME}/src/core/mpeg_native.c"
 	"${PS2NATIVE_RUNTIME}/src/core/kernel.c"
 	"${PS2NATIVE_RUNTIME}/src/core/memory.c"
 	"${PS2NATIVE_RUNTIME}/src/core/rtmain.c"
@@ -20,6 +26,10 @@ target_compile_definitions(ps2native-rt PUBLIC PS2_IMAGE_RESOURCE _CRT_SECURE_NO
 set_target_properties(ps2native-rt PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
 target_compile_options(ps2native-rt PRIVATE /O2 /W3 /wd4146 /wd4244 /wd4018 /wd4996)
 target_link_libraries(ps2native-rt PUBLIC winmm)
+# Native MPEG-2 decoding (mpeg_native.c): FFmpeg API from PCSX2's dependencies
+# (avcodec-63); at run time the full FFmpeg DLLs from tools/ffmpeg are used.
+target_include_directories(ps2native-rt PRIVATE "${PS2NATIVE_RUNTIME}/../third_party/pcsx2/deps/include")
+target_link_libraries(ps2native-rt PUBLIC "${PS2NATIVE_RUNTIME}/../third_party/pcsx2/deps/bin/avcodec.lib" "${PS2NATIVE_RUNTIME}/../third_party/pcsx2/deps/bin/avutil.lib")
 
 if(PS2NATIVE_GAME_DIR)
 	file(TO_CMAKE_PATH "${PS2NATIVE_GAME_DIR}" PS2NATIVE_GAME_DIR)
@@ -47,8 +57,11 @@ if(PS2NATIVE_GAME_DIR)
 		"${CMAKE_SOURCE_DIR}/pcsx2"
 	)
 	target_link_libraries(ps2native-game PRIVATE PCSX2_FLAGS PCSX2 ps2native-game-code)
-	target_link_options(ps2native-game PRIVATE /STACK:67108864)
+	# Exported runtime symbols for overlays compiled at run time; the import
+	# library lands next to the exe (bin/<name>.lib).
+	target_link_options(ps2native-game PRIVATE /STACK:67108864 "/DEF:${CMAKE_CURRENT_LIST_DIR}/ps2rt_exports.def")
 	set_target_properties(ps2native-game PROPERTIES
 		OUTPUT_NAME "${PS2NATIVE_GAME_NAME}"
-		RUNTIME_OUTPUT_DIRECTORY "${PS2NATIVE_GAME_DIR}/bin")
+		RUNTIME_OUTPUT_DIRECTORY "${PS2NATIVE_GAME_DIR}/bin"
+		ARCHIVE_OUTPUT_DIRECTORY "${PS2NATIVE_GAME_DIR}/bin")
 endif()

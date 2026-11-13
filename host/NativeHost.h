@@ -42,6 +42,7 @@ struct ps2_config_view
 	char iso_path[1024];
 	char bios_path[1024];
 	char boot_path[256];
+	int hle_iop;
 	int reference;
 	int upscale;
 	int widescreen;
@@ -87,5 +88,6 @@ namespace NativeHostMain
 	void ProcessCPUThreadQueue();
 	void SaveScreenshot(const char* path);
 	void OnControllerChanged();
+	void ScriptedInput(uint32_t frame);
 	void Shutdown();
 }

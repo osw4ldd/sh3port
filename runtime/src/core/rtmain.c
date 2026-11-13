@@ -54,7 +54,8 @@ static void usage(const char *argv0)
            "  --renderer NAME   auto, vulkan, dx11, dx12, opengl, software (PCSX2 build)\n"
            "  --iso FILE        disc image (PCSX2 build: real CD/DVD drive emulation)\n"
            "  --bios PATH       PS2 BIOS file or folder (PCSX2 build: real IOP, audio, pad)\n"
-           "  --boot PATH       guest argv[0], e.g. cdrom0:\\SLUS_123.45;1\n"
+           "  --hle-iop         ignore the BIOS: native HLE IOP (CD from --iso)\n"
+           "  --boot PATH     guest argv[0], e.g. cdrom0:\\SLUS_123.45;1\n"
            "  --scale N         window scale factor (default 1)\n"
            "  --upscale N       internal resolution x N (default 3)\n"
            "  --widescreen      16:9 output (needs the game's widescreen patch)\n"
@@ -199,6 +200,8 @@ int ps2rt_parse_args(int argc, char **argv)
             ps2_cfg.fullscreen = 1;
         } else if (!strcmp(a, "--windowed")) {
             ps2_cfg.fullscreen = 0;
+        } else if (!strcmp(a, "--hle-iop")) {
+            ps2_cfg.hle_iop = 1;
         } else if (!strcmp(a, "--reference")) {
             ps2_cfg.reference = 1;
         } else if (!strcmp(a, "--trace")) {

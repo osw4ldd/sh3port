@@ -42,7 +42,56 @@ static int ee_ready = 1;
 static uint32_t sif_regs[8];          /* 1 mainaddr, 2 subaddr, 3 msflag, 4 smflag */
 static uint32_t sif_sysregs[8];       /* 0x80000000 + n */
 static uint32_t dma_id;
-static uint32_t iop_heap_ptr = IOP_HEAP_BASE;
+/* IOP heap (sceSifAllocIopHeap / sceSifFreeIopHeap): first fit over the
+ * IOP RAM not used by the HLE (no IRX code lives there).  Games allocate and
+ * free large stream buffers (SH3: 266 KB, 160 KB, ...). */
+#define MAX_HEAP_BLOCKS 256
+static struct { uint32_t addr, size; } heap_used[MAX_HEAP_BLOCKS];
+static int heap_nused;
+static const struct { uint32_t lo, hi; } heap_arenas[] = {
+    {0x00020000u, 0x00100000u}, {IOP_HEAP_BASE, IOP_HEAP_END}};
+
+static uint32_t iop_heap_alloc(uint32_t size)
+{
+    size = (size + 255) & ~255u;
+    if (!size || heap_nused >= MAX_HEAP_BLOCKS)
+        return 0;
+    for (size_t a = 0; a < sizeof heap_arenas / sizeof heap_arenas[0]; a++) {
+        uint32_t p = heap_arenas[a].lo;
+        for (;;) {
+            uint32_t next = p;   /* first used block overlapping [p, p+size) */
+            int hit = 0;
+            for (int i = 0; i < heap_nused; i++)
+                if (heap_used[i].addr < p + size && heap_used[i].addr + heap_used[i].size > p) {
+                    hit = 1;
+                    if (heap_used[i].addr + heap_used[i].size > next)
+                        next = heap_used[i].addr + heap_used[i].size;
+                }
+            if (!hit) {
+                if (p + size > heap_arenas[a].hi)
+                    break;
+                heap_used[heap_nused].addr = p;
+                heap_used[heap_nused].size = size;
+                heap_nused++;
+                return p;
+            }
+            p = next;
+            if (p + size > heap_arenas[a].hi)
+                break;
+        }
+    }
+    return 0;
+}
+
+static int iop_heap_free(uint32_t addr)
+{
+    for (int i = 0; i < heap_nused; i++)
+        if (heap_used[i].addr == addr) {
+            heap_used[i] = heap_used[--heap_nused];
+            return 0;
+        }
+    return -1;
+}
 
 typedef struct out_pkt {
     uint8_t pkt[128];
@@ -427,8 +476,14 @@ static int32_t fio_call(uint32_t fno, uint8_t *arg, uint32_t ssize)
 }
 
 /* ============================================================ servers */
+/* Function-level HLE (hle_iop.c) reuses the host file layer. */
+int32_t sif_fio(uint32_t fno, uint8_t *arg) { return fio_call(fno, arg, 0); }
+
 typedef int32_t (*server_fn)(uint32_t fno, uint8_t *arg, uint32_t ssize, uint8_t *reply,
                              uint32_t *reply_size);
+
+server_fn iop_service_for_sid(uint32_t sid);   /* iop_services.c */
+int iop_dtx_dma(uint32_t ee_src, uint32_t iop_dest, uint32_t size);
 
 typedef struct server {
     uint32_t sid;
@@ -450,15 +505,13 @@ static int32_t srv_iopheap(uint32_t fno, uint8_t *arg, uint32_t ssize, uint8_t *
     uint32_t r = 0;
     switch (fno) {
     case 1: { /* alloc(size) */
-        uint32_t size = (rd32le(arg) + 255) & ~255u;
-        if (iop_heap_ptr + size <= IOP_HEAP_END) {
-            r = iop_heap_ptr;
-            iop_heap_ptr += size;
-        }
+        r = iop_heap_alloc(rd32le(arg));
+        if (ps2_cfg.trace_syscalls || !r)
+            ps2_log("iop heap alloc %X -> %X", rd32le(arg), r);
         break;
     }
-    case 2: /* free */
-        r = 0;
+    case 2: /* free(addr) */
+        r = (uint32_t)iop_heap_free(rd32le(arg));
         break;
     case 3: { /* load file into IOP memory {addr, name[]} */
         uint32_t addr = rd32le(arg);
@@ -556,8 +609,11 @@ static server *server_for_sid(uint32_t sid)
     case 0x80000003: s->fn = srv_iopheap; break;
     case 0x80000006: s->fn = srv_loadfile; break;
     default:
-        s->fn = srv_dummy;
-        ps2_log("IOP RPC server 0x%08X is not emulated; calls will return zeros", sid);
+        s->fn = iop_service_for_sid(sid);
+        if (!s->fn) {
+            s->fn = srv_dummy;
+            ps2_log("IOP RPC server 0x%08X is not emulated; calls will return zeros", sid);
+        }
         break;
     }
     nservers++;
@@ -677,6 +733,8 @@ int sif_set_dma(uint32_t transfers, int count)
         if (size > IOP_RAM_SIZE - dest)
             size = IOP_RAM_SIZE - dest;
         ps2_mem_read(src, iop_ptr(dest), size);
+        if (iop_dtx_dma(src, dest, size))
+            continue;
         if (dest == IOP_CMDBUF)
             iop_command(iop_ptr(IOP_CMDBUF));
     }

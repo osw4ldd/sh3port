@@ -1,0 +1,47 @@
+; Runtime symbols used by guest code that is recompiled while the game runs
+; (overlays, see runtime/src/core/dyn.c).  Such code is built into a DLL that
+; links against this exe's import library.
+EXPORTS
+	ps2_ram DATA
+	ps2_spr DATA
+	ps2_pagemap DATA
+	ps2_event_flag DATA
+	ps2_cop0 DATA
+	ps2_opt_flags DATA
+	ps2_verbose DATA
+	ps2_vu0_mem DATA
+	ps2_io_read8
+	ps2_io_read16
+	ps2_io_read32
+	ps2_io_read64
+	ps2_io_read128
+	ps2_io_write8
+	ps2_io_write16
+	ps2_io_write32
+	ps2_io_write64
+	ps2_io_write128
+	ps2_mem_read
+	ps2_mem_write
+	ps2_mem_strlen
+	ps2_mem_readstr
+	ps2_call
+	ps2_jump
+	ps2_syscall
+	ps2_break
+	ps2_trap
+	ps2_eret
+	ps2_bad_entry
+	ps2_unimplemented
+	ps2_lookup
+	ps2_service
+	ps2_mfc0
+	ps2_mtc0
+	ps2_ei
+	ps2_di
+	ps2_cpcond0
+	ps2_log
+	ps2_warn_once
+	ps2_fatal
+	vu0_callms
+	vu0_cfc2
+	vu0_ctc2

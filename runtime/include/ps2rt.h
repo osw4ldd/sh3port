@@ -17,6 +17,14 @@
 extern "C" {
 #endif
 
+/* Runtime data that generated code reads.  Code compiled at run time into a
+ * DLL (PS2_DYN_MODULE, see runtime/src/core/dyn.c) imports it from the exe. */
+#if defined(PS2_DYN_MODULE) && defined(_MSC_VER)
+#define PS2_IMPORT __declspec(dllimport)
+#else
+#define PS2_IMPORT
+#endif
+
 #if defined(__GNUC__) || defined(__clang__)
 #define PS2_LIKELY(x) __builtin_expect(!!(x), 1)
 #define PS2_UNLIKELY(x) __builtin_expect(!!(x), 0)
@@ -89,6 +97,27 @@ typedef struct ps2_func_entry {
     ps2_fn fn;
 } ps2_func_entry;
 
+/* Entry of a module compiled at run time (overlay code, see dyn.c): the first
+ * instruction words let the runtime check that the code in memory is still
+ * the code that was compiled. */
+typedef struct ps2_dyn_entry {
+    uint32_t addr;
+    uint32_t secondary;
+    ps2_fn fn;
+    uint32_t words[4];
+} ps2_dyn_entry;
+/* Original bodies of the functions replaced through the game config "hle". */
+typedef struct ps2_hle_orig { const char *name; ps2_fn fn; } ps2_hle_orig;
+extern const ps2_hle_orig ps2_hle_origs[];
+/* Run the original (recompiled) code of an HLE'd function on the current context. */
+int ps2_hle_original(R5900 *c, const char *name);
+/* Call guest code at `addr` with up to 4 arguments; returns v0.  Registers the
+ * callee may clobber are restored for the HLE caller. */
+uint32_t ps2_hle_call_guest(R5900 *c, uint32_t addr, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3);
+/* Function-level HLE hook (game config "hle"): returns 1 if handled natively. */
+int ps2_hle(R5900 *c, int *id, const char *name);
+ps2_fn ps2_dyn_lookup(uint32_t addr, int *secondary);
+
 /* Generated tables (functable.c) */
 extern const ps2_func_entry ps2_func_table[];
 extern const uint32_t ps2_func_count;
@@ -106,7 +135,7 @@ extern const uint32_t ps2_patch_count;
 #define PS2_MAX_OPTIONS 16
 extern const char *const ps2_option_names[];
 extern const uint32_t ps2_option_count;
-extern uint8_t ps2_opt_flags[PS2_MAX_OPTIONS];
+extern PS2_IMPORT uint8_t ps2_opt_flags[PS2_MAX_OPTIONS];
 /* The original ELF, embedded in the executable (incbin or a Win32 resource). */
 const unsigned char *ps2_get_elf_image(uint32_t *size);
 
@@ -114,9 +143,9 @@ const unsigned char *ps2_get_elf_image(uint32_t *size);
 #define PS2_RAM_SIZE  (32u * 1024 * 1024)
 #define PS2_PAGE_BITS 12
 
-extern uint8_t *ps2_ram;
-extern uint8_t *ps2_spr;            /* 16 KiB scratchpad */
-extern uint8_t *ps2_pagemap[1u << (32 - PS2_PAGE_BITS)];
+extern PS2_IMPORT uint8_t *ps2_ram;
+extern PS2_IMPORT uint8_t *ps2_spr;            /* 16 KiB scratchpad */
+extern PS2_IMPORT uint8_t *ps2_pagemap[1u << (32 - PS2_PAGE_BITS)];
 
 uint8_t ps2_io_read8(uint32_t a);
 uint16_t ps2_io_read16(uint32_t a);
@@ -200,7 +229,7 @@ ps2_fn ps2_lookup(uint32_t addr, int *secondary);
 
 /* Events (interrupts, timers, vblank) are delivered at safe points: backward
  * branches, syscalls and hardware register accesses. */
-extern volatile int ps2_event_flag;
+extern PS2_IMPORT volatile int ps2_event_flag;
 void ps2_service(R5900 *c);
 #define PS2_POLL(c)                                     \
     do {                                                \
@@ -217,7 +246,7 @@ void ps2_service(R5900 *c);
     } while (0)
 
 /* ------------------------------------------------------------ COP0 */
-extern uint32_t ps2_cop0[32];
+extern PS2_IMPORT uint32_t ps2_cop0[32];
 uint32_t ps2_mfc0(R5900 *c, int reg, int sel);
 void ps2_mtc0(R5900 *c, int reg, int sel, uint32_t v);
 void ps2_ei(R5900 *c);
@@ -468,7 +497,7 @@ static inline void ps2_ctc1(R5900 *c, int reg, uint32_t v)
 void ps2_log(const char *fmt, ...) PS2_PRINTF(1, 2);
 void ps2_warn_once(const char *key, const char *fmt, ...) PS2_PRINTF(2, 3);
 PS2_NORETURN_PRE void ps2_fatal(const char *fmt, ...) PS2_PRINTF(1, 2) PS2_NORETURN_POST;
-extern int ps2_verbose;
+extern PS2_IMPORT int ps2_verbose;
 
 #include "ps2_mmi.h"
 #include "ps2_vu0.h"

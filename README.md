@@ -1,17 +1,19 @@
-# ps2native
+# Silent Hill 3 — Native PC Port
 
-**PS2 oyunlarını emülatörsüz, native x86-64 Windows programı olarak çalıştırma projesi.**
+**Silent Hill 3'ün (ABD, SLUS-20622) emülatörsüz, native x86-64 Windows portu.**
 
-ps2native, PlayStation 2'nin ana işlemcisi Emotion Engine (MIPS R5900) için yazılmış
-oyun kodunu **statik olarak** C'ye çevirir ve MSVC ile normal bir Windows `.exe`'sine
-derler. Oyun mantığı çalışma anında yorumlanmaz ya da JIT ile çevrilmez; doğrudan
-işlemcinizde native kod olarak çalışır. Grafik, ses, disk ve kumanda gibi PS2 donanımı
-ise [PCSX2](https://github.com/PCSX2/pcsx2) çekirdeğinden gelir. Görüntü
-**Direct3D 12 / Direct3D 11 / Vulkan / OpenGL** ile çizilir.
+Oyunun PlayStation 2 ana işlemcisi (Emotion Engine, MIPS R5900) için yazılmış kodu
+**statik olarak** C'ye çevrilir ve MSVC ile normal bir Windows `.exe`'sine derlenir.
+Oyun mantığı yorumlanmaz ya da JIT ile çevrilmez; doğrudan işlemcinizde native kod
+olarak çalışır. Hedef, modern bilgisayarlara uygun bir Silent Hill 3 portu: yüksek
+çözünürlük, 16:9 geniş ekran, 60 FPS seçeneği, modern kumandalar, kendi launcher'ı ve
+**zamanla PCSX2'ye hiç bağımlı olmadan** çalışmak.
 
-Projenin şu anki hedefi **Silent Hill 3 (ABD, SLUS-20622)** için modern bilgisayarlara
-uygun bir "native PC portu" çıkarmak: yüksek çözünürlük, 16:9 geniş ekran, 60 FPS
-seçeneği, modern kumandalar ve kendi launcher'ı.
+Bugün grafik (GS/VU1), ses (SPU2) ve PS2 donanımının bir kısmı hâlâ
+[PCSX2](https://github.com/PCSX2/pcsx2) çekirdeğinden geliyor. Bu parçalar aşama aşama
+native kodla değiştiriliyor; plan ve ilerleme [`NATIVE_PLAN.md`](NATIVE_PLAN.md) dosyasında.
+Altyapının adı **ps2native**: recompiler (`recompiler/ps2recomp`) ve runtime
+(`runtime/`).
 
 > **Oyun dosyaları ve BIOS bu depoda yoktur.** Kendi diskinizden aldığınız oyun
 > imajını ve kendi PS2 konsolunuzdan aldığınız BIOS'u kullanmanız gerekir.
@@ -86,8 +88,17 @@ Silent Hill 3 (SLUS-20622), PCSX2 arka ucu + gerçek IOP (LLE) ile:
 | Yüksek çözünürlük (1×–8×), 16:9 geniş ekran, kenarlıksız tam ekran | ✅ |
 | Harici GPU seçimi (NVIDIA Optimus / AMD) | ✅ |
 | 60 FPS, kamera yamaları (çalışma anında açılıp kapanabilir) | ✅ derleniyor, oyun içinde ayrıca test edilmeli |
-| **FMV / video oynatma** (Konami intro videosu) | ❌ Siyah ekran, üzerinde çalışılıyor (bkz. [`VIDEO_FIX_NOTES.md`](VIDEO_FIX_NOTES.md)) |
-| Oyun içi oynanış | ⏳ Video sorunu çözülünce test edilecek |
+| **FMV / video oynatma** | ✅ Tam ekran oynuyor ([`VIDEO_FIX_NOTES.md`](VIDEO_FIX_NOTES.md)). FMV'ler yaklaşık yarı hızda (≈16 resim/s), VBlank zamanlaması inceleniyor |
+| Oyun içi kod parçaları (overlay'ler) | ✅ Çalışma anında derlenip DLL olarak yükleniyor (`runtime/src/core/dyn.c`) |
+| Oyun içi oynanış | ⏳ Test ediliyor |
+
+PCSX2'siz geçiş ([`NATIVE_PLAN.md`](NATIVE_PLAN.md)):
+
+| Aşama | Durum |
+|---|---|
+| 1. IOP native (BIOS'suz), `--hle-iop` | ⏳ CD/dosya (ISO'dan), IRX yükleme, SH3 ses sürücüsü ve CRI ADX protokolleri, IOP heap çalışıyor; yükleme ekranı geçiliyor. Hafıza kartı ve pad sırada |
+| 2. FMV: IPU yerine native MPEG-2 (FFmpeg), `PS2NATIVE_MPEG=native` | ✅ Gerçek IPU çıktısıyla kare kare doğrulandı (ortalama fark 0,11/255) |
+| 3. VU1, 4. GS renderer, 5. ses (SPU2), 6. PCSX2'yi kaldırma | ⏳ |
 
 ## Klasör yapısı
 
@@ -96,7 +107,9 @@ ps2native/
 ├── recompiler/ps2recomp/   Python recompiler (elf, r5900, analysis, codegen, pnach, iso, build)
 ├── runtime/
 │   ├── include/            ps2rt.h, ps2_mmi.h, ps2_vu0.h (üretilen kodun kullandığı başlıklar)
-│   └── src/core/           kernel.c (EE kernel HLE), dispatch.c, memory.c, sif.c, sif_lle.c, rtmain.c
+│   └── src/core/           kernel.c (EE kernel HLE), dispatch.c, memory.c, sif.c, sif_lle.c, rtmain.c,
+│                           dyn.c (overlay derleme), hle_iop.c / iop_services.c / iso.c (native IOP),
+│                           hle_mpeg.c / mpeg_native.c (native FMV)
 │   └── src/soft/           yazılımsal arka uç
 ├── host/                   PCSX2 arka ucu: Main.cpp (pencere, ayarlar, kumanda), NativeCpu.cpp (EE sağlayıcı)
 ├── patches/                PCSX2 commit numarası + native-host yaması
@@ -106,6 +119,7 @@ ps2native/
 ├── scripts/                PCSX2 kurulum/derleme, paketleme betikleri
 ├── tests/                  Assembler ile üretilen R5900 test programları
 ├── bios/                   Kendi BIOS'unuzu buraya koyun (depoda yok)
+├── NATIVE_PLAN.md          PCSX2'siz native port planı, ölçümler ve bulgular
 └── VIDEO_FIX_NOTES.md      FMV sorunu üzerine çalışma notları
 ```
 
@@ -123,6 +137,10 @@ Gereksinimler:
 * Python 3.11+ (launcher görselleri için `pip install pillow`, paketleme için
   `pip install pyinstaller`)
 * git, curl, 7-Zip (PCSX2 kurulumu için)
+* Native FMV için FFmpeg (LGPL, shared): `ffmpeg-n9.0-latest-win64-lgpl-shared-9.0.zip`
+  ([BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds/releases)) dosyasını
+  `tools/ffmpeg/` altına açın. Paketleme bu DLL'leri oyun klasörüne kopyalar (PCSX2'nin
+  kendi FFmpeg'inde decoder yok).
 
 PCSX2'yi test edilen commit'te indirip yamayı uygulamak ve hazır bağımlılıkları almak için:
 

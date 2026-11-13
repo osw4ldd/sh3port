@@ -37,6 +37,8 @@ ps2_fn ps2_lookup(uint32_t addr, int *secondary)
         if (seg == 0x2 || seg == 0x3 || seg == 0x8 || seg == 0xA)
             fn = find_fn(addr & 0x0FFFFFFFu, secondary);
     }
+    if (!fn) /* code loaded at run time (overlays): recompiled on demand */
+        fn = ps2_dyn_lookup(addr & 0x1FFFFFFFu, secondary);
     return fn;
 }
 
@@ -86,10 +88,31 @@ static void watch_call(R5900 *c, uint32_t addr)
             env = *end ? end + 1 : end;
         }
     }
-    for (int i = 0; i < nwatch; i++)
-        if (watch[i] == addr)
-            ps2_log("watch: call %08X a0=%08X a1=%08X ra=%08X", addr, c->r[4].UW[0], c->r[5].UW[0],
-                    c->r[31].UW[0]);
+    static uint32_t peek[8];
+    static int npeek = -1;
+    if (npeek < 0) {
+        /* PS2NATIVE_PEEK=hex,hex: guest words printed with each watched call */
+        const char *env = getenv("PS2NATIVE_PEEK");
+        npeek = 0;
+        while (env && *env && npeek < 8) {
+            char *end;
+            unsigned long v = strtoul(env, &end, 16);
+            if (end == env)
+                break;
+            peek[npeek++] = (uint32_t)v;
+            env = *end ? end + 1 : end;
+        }
+    }
+    for (int i = 0; i < nwatch; i++) {
+        if (watch[i] != addr)
+            continue;
+        char vals[160] = "";
+        int len = 0;
+        for (int k = 0; k < npeek; k++)
+            len += snprintf(vals + len, sizeof vals - len, " [%08X]=%08X", peek[k], ps2_read32(peek[k]));
+        ps2_log("watch: call %08X a0=%08X a1=%08X ra=%08X%s", addr, c->r[4].UW[0], c->r[5].UW[0],
+                c->r[31].UW[0], vals);
+    }
 }
 
 void ps2_call(R5900 *c, uint32_t addr)

@@ -101,6 +101,7 @@ def main(argv=None):
     ini_defaults = {}
     pnach_options = {}   # runtime option name -> pnach section
     pnach_file, pnach_sections = args.pnach, None
+    hle = {}
     if args.pnach_sections is not None:
         pnach_sections = [x for x in args.pnach_sections.split(",")]
     if args.config:
@@ -116,6 +117,8 @@ def main(argv=None):
         if pnach_sections is None:
             pnach_sections = cfg.get("pnach_sections")
         pnach_options = cfg.get("pnach_options", {})
+        hle = {parse_addr(a): n for a, n in cfg.get("hle", {}).items()}
+        entries |= set(hle)
 
     runtime_patches, options, toggles = [], list(pnach_options), {}
     if pnach_file:
@@ -139,7 +142,7 @@ def main(argv=None):
     print("analysis: " + prog.summary())
 
     files, warnings = write_project(prog, args.out, name, elf.path, patches=runtime_patches,
-                                    options=options, branch_toggles=toggles)
+                                    options=options, branch_toggles=toggles, hle=hle)
     print(f"generated {len(files)} C files in {Path(args.out) / 'gen'}"
           + (f" ({len(warnings)} warnings, see recomp_report.txt)" if warnings else ""))
     if args.no_build:

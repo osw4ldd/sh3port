@@ -25,6 +25,7 @@
 #include "pcsx2/GS.h"
 #include "pcsx2/GS/GS.h"
 #include "pcsx2/MTGS.h"
+#include "pcsx2/Gif_Unit.h"
 #include "pcsx2/VMManager.h"
 #include "common/Console.h"
 
@@ -98,34 +99,71 @@ static std::mutex s_prof_mutex;
 static std::unordered_map<u64, u32> s_prof_hits;
 static u32 s_prof_total;
 
+// Held while the EE thread is suspended.  be_shutdown() takes it and stops the
+// profiler first: if the process exits between SuspendThread and ResumeThread
+// the EE thread stays suspended, and the dead process keeps its files (the
+// memory card) locked.
+static std::mutex s_prof_suspend_mutex;
+static bool s_prof_stop;
+
+static u64 s_exe_lo, s_exe_hi;
+static std::unordered_map<u64, u32> s_prof_callers[3];
+
 static void ProfilerThread()
 {
 	timeBeginPeriod(1);
+	{
+		const u8* base = reinterpret_cast<const u8*>(GetModuleHandleW(nullptr));
+		const IMAGE_NT_HEADERS* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+		s_exe_lo = reinterpret_cast<u64>(base);
+		s_exe_hi = s_exe_lo + nt->OptionalHeader.SizeOfImage;
+	}
 	for (;;)
 	{
 		Sleep(1);
-		if (SuspendThread(s_prof_target) == static_cast<DWORD>(-1))
+		std::lock_guard suspend_lock(s_prof_suspend_mutex);
+		if (s_prof_stop || SuspendThread(s_prof_target) == static_cast<DWORD>(-1))
 			return;
 		CONTEXT ctx = {};
 		ctx.ContextFlags = CONTEXT_CONTROL;
 		const BOOL ok = GetThreadContext(s_prof_target, &ctx);
+		// Sample outside the exe (a system call such as a wait): also find who
+		// called it, as the first return addresses into the exe on the stack.
+		u64 stack[384];
+		SIZE_T got = 0;
+		const bool outside = ok && (ctx.Rip < s_exe_lo || ctx.Rip >= s_exe_hi);
+		if (outside)
+			ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(ctx.Rsp), stack, sizeof(stack), &got);
 		ResumeThread(s_prof_target); // resume before allocating (heap locks)
 		if (ok)
 		{
 			std::lock_guard lock(s_prof_mutex);
 			s_prof_hits[ctx.Rip]++;
 			s_prof_total++;
+			int found = 0;
+			for (size_t i = 0; outside && i < got / 8 && found < 3; i++)
+			{
+				const u64 v = stack[i];
+				if (v < s_exe_lo + 8 || v >= s_exe_hi)
+					continue;
+				const u8* c = reinterpret_cast<const u8*>(v);
+				if (c[-5] != 0xE8 && c[-2] != 0xFF && c[-3] != 0xFF && c[-6] != 0xFF && c[-7] != 0xFF)
+					continue; // not preceded by a call instruction
+				s_prof_callers[found++][v]++;
+			}
 		}
 	}
 }
 
 static void ProfilerReport()
 {
-	std::unordered_map<u64, u32> hits;
+	std::unordered_map<u64, u32> hits, callers[3];
 	u32 total;
 	{
 		std::lock_guard lock(s_prof_mutex);
 		hits.swap(s_prof_hits);
+		for (int i = 0; i < 3; i++)
+			callers[i].swap(s_prof_callers[i]);
 		total = s_prof_total;
 		s_prof_total = 0;
 	}
@@ -140,9 +178,7 @@ static void ProfilerReport()
 		SymInitialize(proc, nullptr, TRUE);
 	}
 	static std::unordered_map<u64, std::string> names;
-	std::unordered_map<std::string, u32> by_name;
-	for (const auto& [rip, n] : hits)
-	{
+	const auto name_of = [proc](u64 rip) -> const std::string& {
 		auto it = names.find(rip);
 		if (it == names.end())
 		{
@@ -167,8 +203,11 @@ static void ProfilerReport()
 			}
 			it = names.emplace(rip, std::move(name)).first;
 		}
-		by_name[it->second] += n;
-	}
+		return it->second;
+	};
+	std::unordered_map<std::string, u32> by_name;
+	for (const auto& [rip, n] : hits)
+		by_name[name_of(rip)] += n;
 	std::vector<std::pair<u32, std::string>> top;
 	for (auto& [name, n] : by_name)
 		top.emplace_back(n, name);
@@ -177,6 +216,22 @@ static void ProfilerReport()
 	for (size_t i = 0; i < top.size() && i < 14; i++)
 		line += fmt::format("\n      {:5.1f}%  {}", top[i].first * 100.0 / total, top[i].second);
 	std::fprintf(stderr, "[ps2] host profile (%u samples):%s\n", total, line.c_str());
+	// Who the samples in system code (waits, I/O) belong to: nearest callers in the exe.
+	for (int level = 0; level < 3; level++)
+	{
+		by_name.clear();
+		for (const auto& [rip, n] : callers[level])
+			by_name[name_of(rip)] += n;
+		top.clear();
+		for (auto& [name, n] : by_name)
+			top.emplace_back(n, name);
+		std::sort(top.begin(), top.end(), std::greater<>());
+		line.clear();
+		for (size_t i = 0; i < top.size() && i < 5; i++)
+			line += fmt::format(" {:.1f}% {};", top[i].first * 100.0 / total, top[i].second);
+		if (!line.empty())
+			std::fprintf(stderr, "[ps2] system-code samples, caller level %d:%s\n", level + 1, line.c_str());
+	}
 }
 
 static void NativeExecute()
@@ -260,6 +315,48 @@ static void IoLog(const char* op, u32 a, u64 v)
 }
 #define IO_TRACE(op, a, v) do { if (ps2_cfg.trace_syscalls && IoTraced(a)) IoLog(op, a, v); } while (0)
 
+// PS2NATIVE_IO_DMA=<seconds> (debugging): from that host time on, log every
+// start of DMA channel 1 (VIF1) and 2 (GIF) with the running thread (-1 =
+// interrupt handler) and the head of the transfer.
+int kernel_thread_id(void);
+static double s_dma_trace_d2_start = -1.0;
+static void DmaStallLog()
+{
+	// Same switch: DMA/GIF state 3 ms after the last GIF DMA start (a stalled or unanswered transfer).
+	if (s_dma_trace_d2_start < 0 || ps2_host_time() - s_dma_trace_d2_start < 0.003)
+		return;
+	std::fprintf(stderr, "[dma %8.3f] no GIF DMA start for 3 ms: DMAC_STAT %08X D2_CHCR %08X QWC %X TADR %08X | D1_CHCR %08X QWC %X TADR %08X | GIF_STAT %08X VIF1_STAT %08X "
+			"APATH %u p3state %d signal %d | interrupt %08X dmastall %08X next event in %lld cycles, EE ahead of wall by %lld cycles\n",
+			ps2_host_time(), psHu32(DMAC_STAT), psHu32(0xA000), psHu32(0xA020), psHu32(0xA030), psHu32(0x9000), psHu32(0x9020), psHu32(0x9030),
+			psHu32(0x3020), psHu32(0x3C00), static_cast<unsigned>(gifUnit.stat.APATH), static_cast<int>(gifUnit.gifPath[GIF_PATH_3].state),
+			gifUnit.gsSIGNAL.queued ? 1 : 0, cpuRegs.interrupt, cpuRegs.dmastall,
+			static_cast<long long>(cpuRegs.nextEventCycle - cpuRegs.cycle),
+			static_cast<long long>(cpuRegs.cycle - (s_cycle_base + static_cast<u64>((ps2_host_time() - s_time_base) * EE_CLOCK))));
+	s_dma_trace_d2_start = -1.0;
+}
+static void DmaStartLog(u32 a, u32 v)
+{
+	static const double from = [] {
+		const char* env = std::getenv("PS2NATIVE_IO_DMA");
+		return env ? std::atof(env) : -1.0;
+	}();
+	static int logged;
+	a &= 0x1FFFFFFFu;
+	if (from < 0 || (a != 0x10009000u && a != 0x1000A000u) || !(v & 0x100) || ps2_host_time() < from || logged > 4000)
+		return;
+	logged++;
+	if (a == 0x1000A000u)
+		s_dma_trace_d2_start = ps2_host_time();
+	const u32 base = a & 0xFFFFF000u;
+	const u32 madr = psHu32(base + 0x10), qwc = psHu32(base + 0x20), tadr = psHu32(base + 0x30);
+	const u32 head = ((v & 0xC) == 4 ? tadr : madr) & 0x01FFFFF0u;
+	const u64* q = reinterpret_cast<const u64*>(eeMem->Main + head);
+	std::fprintf(stderr, "[dma %8.3f] thread %d D%u_CHCR=%08X (old %08X) MADR %08X QWC %X TADR %08X | %016llX %016llX %016llX %016llX %016llX %016llX\n",
+		ps2_host_time(), kernel_thread_id(), (a >> 12) & 0xF, v, psHu32(base), madr, qwc, tadr,
+		static_cast<unsigned long long>(q[0]), static_cast<unsigned long long>(q[1]), static_cast<unsigned long long>(q[2]),
+		static_cast<unsigned long long>(q[3]), static_cast<unsigned long long>(q[4]), static_cast<unsigned long long>(q[5]));
+}
+
 // ---------------------------------------------------------------- busy-wait skipping
 // Native code polls hardware far faster than the hardware advances here: the
 // EE clock follows real time and PCSX2's events only run at the runtime's
@@ -268,8 +365,16 @@ static void IoLog(const char* op, u32 a, u64 v)
 // event scheduler up to the next event, like the cycles a real EE spends in
 // the loop.  The EE may run ahead of real time by at most kSpinLead;
 // be_update() then simply waits for the wall clock to catch up.
-static constexpr s64 kSpinLead = static_cast<s64>(EE_CLOCK * 0.004); // 4 ms
-static u64 s_spin_skips;
+static s64 SpinLead()
+{
+	static const s64 lead = [] {
+		const char* env = std::getenv("PS2NATIVE_SPIN_LEAD_MS");
+		const double ms = env ? std::atof(env) : 4.0;
+		return static_cast<s64>(EE_CLOCK * ms / 1000.0);
+	}();
+	return lead;
+}
+static u64 s_spin_skips, s_dma_waits;
 void be_update(void);
 
 static u64 WallCycle()
@@ -279,7 +384,7 @@ static u64 WallCycle()
 
 static void SpinSkip()
 {
-	if (static_cast<s64>(cpuRegs.cycle - WallCycle()) > kSpinLead)
+	if (static_cast<s64>(cpuRegs.cycle - WallCycle()) > SpinLead())
 	{
 		be_update(); // already far ahead: let real time catch up (input, vsync work)
 		return;
@@ -305,6 +410,35 @@ static inline bool BusyPoll(u32 a, u64 v)
 	if (a >= 0x10008000u && a < 0x1000E000u && (a & 0x3FFu) == 0)
 		return (v & 0x100u) != 0;
 	return false;
+}
+
+// A game may start a DMA channel again right after a short transfer without
+// polling STR, because on hardware the first transfer is long finished by
+// then (Silent Hill 3's film player: sceGsPutDrawEnv, then a queued GIF
+// packet from another thread).  Here the first transfer is still "running"
+// until PCSX2's end-of-transfer event fires, and PCSX2 ignores a CHCR write
+// while STR is set (Dmac.cpp, DmaExec), so the second transfer would be lost.
+// Give the hardware the time it needs first: run the event scheduler until
+// the channel has stopped (bounded to one frame of EE time).
+static void FinishRunningDma(u32 a, u32 v)
+{
+	a &= 0x1FFFFFFFu;
+	if (a < 0x10008000u || a >= 0x1000E000u || (a & 0x3FFu) != 0 || !(v & 0x100u) || !(psHu32(a) & 0x100u))
+		return;
+	const u64 start = cpuRegs.cycle;
+	const u64 limit = static_cast<u64>(EE_CLOCK / 60.0);
+	while ((psHu32(a) & 0x100u) && cpuRegs.cycle - start < limit)
+	{
+		const s64 step = std::clamp<s64>(static_cast<s64>(cpuRegs.nextEventCycle - cpuRegs.cycle), 32, 20000);
+		cpuRegs.cycle += static_cast<u64>(step);
+		if (static_cast<s64>(cpuRegs.cycle - cpuRegs.nextEventCycle) >= 0)
+		{
+			_cpuEventTest_Shared();
+			s_events++;
+		}
+	}
+	s_dma_waits++;
+	ps2_event_flag = 1; // deliver the completion interrupt at the next safe point
 }
 
 uint8_t ps2_io_read8(uint32_t a)
@@ -357,9 +491,30 @@ void ps2_io_write16(uint32_t a, uint16_t v)
 	IO_TRACE("w16", a, v);
 	memWrite16(vtlb_addr(a), v);
 }
+extern "C" int mpeg_ipu_dma_start(uint32_t chcr, uint32_t madr, uint32_t qwc, uint32_t tadr,
+	uint32_t* end_madr, uint32_t* end_tadr, uint32_t* end_tag);
+
 void ps2_io_write32(uint32_t a, uint32_t v)
 {
 	IO_TRACE("w32", a, v);
+	DmaStartLog(a, v);
+	FinishRunningDma(a, v);
+	if ((a & 0x1FFFFFFFu) == 0x1000B400u && (v & 0x100u)) // D4_CHCR (toIPU) start: FMV capture / native MPEG
+	{
+		u32 madr, tadr, tag;
+		if (mpeg_ipu_dma_start(v, psHu32(0xB410), psHu32(0xB420) & 0xFFFF, psHu32(0xB430), &madr, &tadr, &tag))
+		{
+			// Native MPEG decoding took the data: finish the transfer as the
+			// DMAC would (STR clear, end registers, CIS4 / interrupt).
+			psHu32(0xB410) = madr;
+			psHu32(0xB420) = 0;
+			psHu32(0xB430) = tadr;
+			psHu32(0xB400) = (v & 0x0000FEFFu) | tag;
+			hwDmacIrq(4);
+			ps2_event_flag = 1;
+			return;
+		}
+	}
 	memWrite32(vtlb_addr(a), v);
 }
 void ps2_io_write64(uint32_t a, uint64_t v)
@@ -514,12 +669,21 @@ void be_update(void)
 			s_events++;
 		}
 	}
+	DmaStallLog();
 	NativeHostMain::ProcessCPUThreadQueue(); // input events, window resizes
 
 	if (g_FrameCount != s_last_frame)
 	{
 		s_last_frame = g_FrameCount;
 		NativeHostMain::ProcessCPUThreadQueue();
+		NativeHostMain::ScriptedInput(g_FrameCount);
+		{
+			// Debugging: PS2NATIVE_DUMP_EVERY=N PS2NATIVE_DUMP_DIR=dir saves a frame every N vblanks.
+			static const u32 every = [] { const char* e = std::getenv("PS2NATIVE_DUMP_EVERY"); return e ? static_cast<u32>(std::atoi(e)) : 0u; }();
+			static const char* dir = std::getenv("PS2NATIVE_DUMP_DIR");
+			if (every && dir && g_FrameCount % every == 0)
+				NativeHostMain::SaveScreenshot(fmt::format("{}/f{:05}.png", dir, g_FrameCount).c_str());
+		}
 		handle_vm_state();
 		const double t0 = Now();
 		kernel_on_vblank();
@@ -530,6 +694,20 @@ void be_update(void)
 
 void be_report(void)
 {
+	// GS/GIF interrupt state (video playback debugging).
+	std::fprintf(stderr,
+		"[ps2] gs: CSR %016llX IMR %016llX INTC_STAT %04X INTC_MASK %04X | gif APATH %u signal_queued %d "
+		"finish pending %d fired %d | D2_CHCR %08X D1_CHCR %08X GIF_STAT %08X\n",
+		static_cast<unsigned long long>(*reinterpret_cast<u64*>(&CSRreg)),
+		static_cast<unsigned long long>(*reinterpret_cast<u64*>(&GSIMR)), psHu32(INTC_STAT), psHu32(INTC_MASK),
+		static_cast<unsigned>(gifUnit.stat.APATH), gifUnit.gsSIGNAL.queued ? 1 : 0,
+		gifUnit.gsFINISH.gsFINISHPending ? 1 : 0, gifUnit.gsFINISH.gsFINISHFired ? 1 : 0, psHu32(0xA000),
+		psHu32(0x9000), psHu32(0x3020));
+	{
+		auto gs = [](u32 off) { return static_cast<unsigned long long>(*reinterpret_cast<u64*>(PS2MEM_GS + off)); };
+		std::fprintf(stderr, "[ps2] GS display: PMODE %016llX SMODE2 %016llX DISPFB1 %016llX DISPLAY1 %016llX DISPFB2 %016llX DISPLAY2 %016llX\n",
+			gs(0x00), gs(0x20), gs(0x70), gs(0x80), gs(0x90), gs(0xA0));
+	}
 	const double emu = static_cast<double>(cpuRegs.cycle) / EE_CLOCK;
 	Console.WriteLn("(ps2native) host %.1fs, emulated %.1fs, lost %.1fs, %llu event tests, frame %u",
 		ps2_host_time(), emu, static_cast<double>(s_lost_cycles) / EE_CLOCK,
@@ -538,11 +716,11 @@ void be_report(void)
 	const double host = ps2_host_time(), span = host - last_host;
 	auto pct = [span](double cur, double last) { return span > 0 ? (cur - last) * 100.0 / span : 0.0; };
 	std::fprintf(stderr, "[ps2] host %.1fs emulated %.1fs lost %.1fs events %llu frame %u | "
-		"be_update %.0f%% (event tests %.0f%%, vblank %.0f%%) spin skips %llu\n",
+		"be_update %.0f%% (event tests %.0f%%, vblank %.0f%%) spin skips %llu dma waits %llu\n",
 		host, emu, static_cast<double>(s_lost_cycles) / EE_CLOCK,
 		static_cast<unsigned long long>(s_events), g_FrameCount,
 		pct(s_t_update, last_update), pct(s_t_events, last_events), pct(s_t_vblank, last_vblank),
-		static_cast<unsigned long long>(s_spin_skips));
+		static_cast<unsigned long long>(s_spin_skips), static_cast<unsigned long long>(s_dma_waits));
 	ProfilerReport();
 	last_host = host;
 	last_update = s_t_update;
@@ -566,6 +744,20 @@ void be_set_crt(int interlace, int mode, int ffmd)
 		case 0x52: gsSetVideoMode(GS_VideoMode::HDTV_720P); break;
 		case 0x53: gsSetVideoMode(GS_VideoMode::HDTV_1080I); break;
 		default: gsSetVideoMode(GS_VideoMode::NTSC); break;
+	}
+	// The rest of the CRT setup the BIOS SetGsCrt call does.  PCSX2 only flips
+	// CSR.FIELD when SMODE1.CMOD != 0 and SYNCV bit 0 is set (Counters.cpp,
+	// IsProgressiveVideoMode); with both left at 0 FIELD stays 1 and games that
+	// sync to a field (Silent Hill 3's film player) wait forever.
+	// NTSC values read back from the real BIOS (SCPH-70000 v2.00 USA) after
+	// SetGsCrt(1, 2, 0) in --reference mode.  PAL/HD modes: not verified yet.
+	if ((mode & 0xFF) == 2)
+	{
+		memWrite64(0x12000010, 0x0000000740814504ull); // SMODE1 (CMOD = NTSC)
+		memWrite64(0x12000030, 0x0000000000000008ull); // SRFSH
+		memWrite64(0x12000040, 0x0007F5B61F06F040ull); // SYNCH1
+		memWrite64(0x12000050, 0x000000000033A4D8ull); // SYNCH2
+		memWrite64(0x12000060, 0x00C7800601A01801ull); // SYNCV
 	}
 	// SMODE2 as the BIOS programs it: INT, FFMD.
 	memWrite64(0x12000020, static_cast<u64>((interlace & 1) | ((ffmd & 1) << 1)));
@@ -629,6 +821,10 @@ int be_vu0_exec(vu0_state* st, uint32_t addr)
 void be_shutdown(int code)
 {
 	(void)code;
+	{
+		std::lock_guard suspend_lock(s_prof_suspend_mutex);
+		s_prof_stop = true;
+	}
 	std::fflush(stdout);
 	NativeHostMain::Shutdown();
 }

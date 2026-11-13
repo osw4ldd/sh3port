@@ -111,7 +111,14 @@ void NativeHostMain::SaveScreenshot(const char* path)
 {
 	// Captured by the GS at its next vsync; Shutdown() waits for the writer.
 	if (MTGS::IsOpen())
-		MTGS::RunOnGSThread([p = std::string(path)]() { GSQueueSnapshot(p); });
+	{
+		// PS2NATIVE_GSDUMP=N (debugging): also record a GS dump of the next N frames next to the PNG.
+		static const u32 gsdump_frames = [] {
+			const char* env = std::getenv("PS2NATIVE_GSDUMP");
+			return env ? static_cast<u32>(std::atoi(env)) : 0u;
+		}();
+		MTGS::RunOnGSThread([p = std::string(path)]() { GSQueueSnapshot(p, gsdump_frames); });
+	}
 }
 
 void NativeHostMain::Shutdown()
@@ -136,7 +143,19 @@ void Host::PumpMessagesOnCPUThread()
 		// Reference runs: same --frames / --dump-frame behaviour as native runs.
 		static bool shot_taken = false;
 		const u32 frame = g_FrameCount;
-		if (ps2_cfg.dump_frame[0] && !shot_taken && frame + 3 >= static_cast<u32>(ps2_cfg.max_frames))
+		// Video registers as the real BIOS SetGsCrt programmed them (used to check the HLE values).
+		static u32 crt_dumps = 0;
+		if (ps2_cfg.trace_syscalls && ((crt_dumps == 0 && frame >= 600) || (crt_dumps == 1 && frame >= 2900)))
+		{
+			crt_dumps++;
+			auto gs = [](u32 off) { return static_cast<unsigned long long>(*reinterpret_cast<u64*>(PS2MEM_GS + off)); };
+			std::fprintf(stderr, "[ref] GS video regs: SMODE1 %016llX SMODE2 %016llX SRFSH %016llX SYNCH1 %016llX SYNCH2 %016llX SYNCV %016llX\n",
+				gs(0x10), gs(0x20), gs(0x30), gs(0x40), gs(0x50), gs(0x60));
+			std::fprintf(stderr, "[ref] GS display: PMODE %016llX DISPFB1 %016llX DISPLAY1 %016llX DISPFB2 %016llX DISPLAY2 %016llX CSR %016llX\n",
+				gs(0x00), gs(0x70), gs(0x80), gs(0x90), gs(0xA0), gs(0x1000));
+		}
+		static const u32 dump_lead = 3 + (std::getenv("PS2NATIVE_GSDUMP") ? static_cast<u32>(std::atoi(std::getenv("PS2NATIVE_GSDUMP"))) : 0u);
+		if (ps2_cfg.dump_frame[0] && !shot_taken && frame + dump_lead >= static_cast<u32>(ps2_cfg.max_frames))
 		{
 			shot_taken = true;
 			NativeHostMain::SaveScreenshot(ps2_cfg.dump_frame);
@@ -373,6 +392,61 @@ static bool MapFirstController()
 	return false;
 }
 
+// Scripted key presses for automated tests: PS2NATIVE_PRESS="2500:Return,3000-6000/90:S"
+// presses a keyboard key (names as in key_<Button> ini entries) at a frame, or
+// every <step> frames in a range, for 6 frames each.  Runs on the CPU thread.
+void NativeHostMain::ScriptedInput(u32 frame)
+{
+	struct Press
+	{
+		u32 first, last, step;
+		u32 vk;
+	};
+	static std::vector<Press> presses;
+	static bool parsed = false;
+	static std::vector<std::pair<u32, u32>> releases; // frame, vk
+	if (!parsed)
+	{
+		parsed = true;
+		const char* env = std::getenv("PS2NATIVE_PRESS");
+		for (const std::string_view item : StringUtil::SplitString(env ? env : "", ','))
+		{
+			const size_t colon = item.find(':');
+			if (colon == std::string_view::npos)
+				continue;
+			const std::string_view when = item.substr(0, colon);
+			const std::optional<u32> vk = InputManager::ConvertHostKeyboardStringToCode(item.substr(colon + 1));
+			if (!vk.has_value())
+				continue;
+			Press p = {};
+			p.vk = vk.value();
+			const size_t dash = when.find('-'), slash = when.find('/');
+			p.first = StringUtil::FromChars<u32>(when.substr(0, dash)).value_or(0);
+			p.last = dash == std::string_view::npos ? p.first : StringUtil::FromChars<u32>(when.substr(dash + 1, slash - dash - 1)).value_or(p.first);
+			p.step = slash == std::string_view::npos ? 1 : std::max<u32>(1, StringUtil::FromChars<u32>(when.substr(slash + 1)).value_or(1));
+			presses.push_back(p);
+		}
+	}
+	for (const Press& p : presses)
+	{
+		if (frame >= p.first && frame <= p.last && (frame - p.first) % p.step == 0)
+		{
+			InputManager::InvokeEvents(InputManager::MakeHostKeyboardKey(p.vk), 1.0f);
+			releases.emplace_back(frame + 6, p.vk);
+		}
+	}
+	for (auto it = releases.begin(); it != releases.end();)
+	{
+		if (frame >= it->first)
+		{
+			InputManager::InvokeEvents(InputManager::MakeHostKeyboardKey(it->second), 0.0f);
+			it = releases.erase(it);
+		}
+		else
+			++it;
+	}
+}
+
 void NativeHostMain::OnControllerChanged()
 {
 	// Called from inside InputManager while input sources are (re)created, so
@@ -455,6 +529,9 @@ static void SettingsOverride()
 			si.SetStringValue("MemoryCards", fmt::format("Slot{}_Filename", i + 1).c_str(), "");
 		}
 	}
+
+	if (std::getenv("PS2NATIVE_GSDUMP"))
+		si.SetIntValue("EmuCore/GS", "GSDumpCompression", static_cast<int>(GSDumpCompressionMethod::Uncompressed));
 
 	si.SetBoolValue("Logging", "EnableSystemConsole", true);
 	si.SetBoolValue("Logging", "EnableVerbose", ps2_verbose != 0);
@@ -644,7 +721,7 @@ int wmain(int argc, wchar_t** argv)
 		return rc == -1 ? 0 : rc;
 
 	CrashHandler::Install();
-	s_lle = ResolveBios();
+	s_lle = !ps2_cfg.hle_iop && ResolveBios();
 	if (ps2_cfg.iso_path[0] && !s_lle)
 		Console.Warning("(ps2native) A disc image was given but no BIOS was found: running with the HLE IOP.");
 	if (!InitializeConfig())

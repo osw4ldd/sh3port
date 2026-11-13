@@ -404,6 +404,18 @@ class FunctionEmitter:
         f = self.f
         name = fname(f.entry)
         comment = f" /* {f.name} */" if f.name else ""
+        hle = self.opt.get("hle", {}).get(f.entry)
+        if hle:
+            # Native replacement (runtime/src/core/hle_iop.c); the original body
+            # stays callable as F_X__orig (ps2_hle_original()).
+            self.out.append(f"void {name}(R5900 *c){comment}")
+            self.out.append("{")
+            self.w("static int hle_id = -1;")
+            self.w(f'if (!c->jump_pc && ps2_hle(c, &hle_id, "{hle}")) return;')
+            self.w(f"{name}__orig(c);")
+            self.out.append("}")
+            self.out.append("")
+            name = f"{name}__orig"
         self.out.append(f"void {name}(R5900 *c){comment}")
         self.out.append("{")
         self.has_reg_jr = any(self.prog.insn(a).kind == K_JR and self.prog.insn(a).rs != 31

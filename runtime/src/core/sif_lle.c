@@ -64,10 +64,111 @@ static uint32_t dma_addr(uint32_t a)
     return a & 0x1FFFFFF0u;
 }
 
+/* PS2NATIVE_RPCLOG=1: log SIF RPC binds/calls sent to the real IOP, the
+ * ground truth for the HLE IOP services.  Packet layouts: ps2sdk
+ * common/include/sifrpc-common.h (SifRpcBindPkt_t, SifRpcCallPkt_t). */
+static void rpc_log(uint32_t transfers, int count)
+{
+    static int on = -1;
+    static uint32_t cd_addr[64], cd_sid[64];
+    static int ncd;
+    if (on < 0)
+        on = getenv("PS2NATIVE_RPCLOG") != NULL;
+    if (!on)
+        return;
+    /* Replies of the previous call: the IOP has answered by the time the EE
+     * sends its next SIF command (the libraries wait on the RPC semaphore). */
+    static uint32_t prev_rbuf, prev_rsz, prev_ptr;
+    if (prev_rbuf || prev_ptr) {
+        char data[200] = "";
+        int len = 0;
+        for (uint32_t w = 0; w < 8 && w * 4 < prev_rsz; w++)
+            len += snprintf(data + len, sizeof data - len, " %08X", ps2_read32(prev_rbuf + w * 4));
+        if (prev_ptr) {
+            len += snprintf(data + len, sizeof data - len, " | [%08X]", prev_ptr);
+            for (uint32_t w = 0; w < 8; w++)
+                len += snprintf(data + len, sizeof data - len, " %08X", ps2_read32(prev_ptr + w * 4));
+        }
+        ps2_log("rpc  reply |%s", data);
+        prev_rbuf = prev_ptr = 0;
+    }
+    /* CRI DTX channels (registered by the ADX init RPC below): dump a buffer
+     * whenever its trailer sequence number changed, i.e. the IOP replied
+     * (or, at send time, the EE request). */
+    static uint32_t dtx_buf[8], dtx_len[8], dtx_seq[8];
+    for (int k = 0; k < 8; k++) {
+        if (!dtx_len[k])
+            continue;
+        uint32_t seq = ps2_read32(dtx_buf[k] + dtx_len[k] - 0x40 + 0x3C);
+        if (seq == dtx_seq[k])
+            continue;
+        dtx_seq[k] = seq;
+        char d[400] = "";
+        int l = 0;
+        for (uint32_t w = 0; w < 20 && l < (int)sizeof d - 10; w++)
+            l += snprintf(d + l, sizeof d - l, " %08X", ps2_read32(dtx_buf[k] + w * 4));
+        ps2_log("dtx %d seq %u |%s", k, seq, d);
+    }
+    for (int i = 0; i < count; i++) {
+        uint32_t src = ps2_read32(transfers + (uint32_t)i * 16) & 0x1FFFFFFFu;
+        uint32_t cid = ps2_read32(src + 8);
+        if (cid == 0x80000009u) {           /* bind: cd @+0x1C, sid @+0x20 */
+            uint32_t cd = ps2_read32(src + 0x1C), sid = ps2_read32(src + 0x20);
+            int k = 0;
+            while (k < ncd && cd_addr[k] != cd) k++;
+            if (k == ncd && ncd < 64) ncd++;
+            if (k < 64) { cd_addr[k] = cd; cd_sid[k] = sid; }
+            ps2_log("rpc bind cd=%08X sid=%08X", cd, sid);
+        } else if (cid == 0x8000000Au) {    /* call */
+            uint32_t cd = ps2_read32(src + 0x1C), fno = ps2_read32(src + 0x20);
+            uint32_t ssz = ps2_read32(src + 0x24), rbuf = ps2_read32(src + 0x28);
+            uint32_t rsz = ps2_read32(src + 0x2C), rmode = ps2_read32(src + 0x30);
+            uint32_t sid = 0;
+            for (int k = 0; k < ncd; k++)
+                if (cd_addr[k] == cd) sid = cd_sid[k];
+            char data[200] = "";
+            int len = 0;
+            for (int j = 0; j < count; j++) {   /* the send buffer travels in the same batch */
+                if (j == i) continue;
+                uint32_t s = ps2_read32(transfers + (uint32_t)j * 16) & 0x1FFFFFFFu;
+                for (int w = 0; w < 12 && w * 4u < ssz && len < (int)sizeof data - 10; w++)
+                    len += snprintf(data + len, sizeof data - len, " %08X", ps2_read32(s + (uint32_t)w * 4));
+                break;
+            }
+            ps2_log("rpc call sid=%08X fno=%u ssz=%u rbuf=%08X rsz=%u mode=%u |%s", sid, fno, ssz,
+                    rbuf, rsz, rmode, data);
+            if (sid == 0x7D000000u && fno == 2) {   /* DTX init {id, ee buf, iop buf, wklen} */
+                for (int j = 0; j < count; j++) {
+                    if (j == i) continue;
+                    uint32_t s = ps2_read32(transfers + (uint32_t)j * 16) & 0x1FFFFFFFu;
+                    uint32_t id = ps2_read32(s);
+                    if (id < 8) {
+                        dtx_buf[id] = ps2_read32(s + 4) & 0x1FFFFFFFu;
+                        dtx_len[id] = ps2_read32(s + 12);
+                    }
+                    break;
+                }
+            }
+            prev_rbuf = rbuf & 0x1FFFFFFFu;
+            prev_rsz = rsz;
+            prev_ptr = 0;
+            for (int j = 0; j < count; j++) {   /* EE pointer in the 2nd send word (fileio, cdvd) */
+                if (j == i) continue;
+                uint32_t s = ps2_read32(transfers + (uint32_t)j * 16) & 0x1FFFFFFFu;
+                uint32_t p = ps2_read32(s + 4) & 0x1FFFFFFFu;
+                if (ssz >= 8 && p >= 0x100000 && p < 0x2000000)
+                    prev_ptr = p;
+                break;
+            }
+        }
+    }
+}
+
 int sif_lle_set_dma(uint32_t transfers, int count)
 {
     if (count <= 0)
         return 0;
+    rpc_log(transfers, count);
     if (count > MAX_XFERS)
         count = MAX_XFERS;
     wait_sif1();

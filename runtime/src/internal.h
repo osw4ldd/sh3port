@@ -27,6 +27,7 @@ typedef struct ps2_config {
     char iso_path[1024];      /* disc image: real IOP + CDVD (PCSX2 backend) */
     char bios_path[1024];     /* PS2 BIOS file or folder (enables the real IOP) */
     char boot_path[256];      /* argv[0] for the guest, e.g. cdrom0:\SLUS_123.45;1 */
+    int hle_iop;              /* ignore the BIOS: HLE IOP (native, no PCSX2 IOP) */
     int reference;            /* PCSX2 build: run the disc fully emulated (comparison) */
     /* PCSX2 build: presentation (ps2native.ini / command line) */
     int upscale;              /* internal resolution multiplier (1 = native PS2) */
@@ -132,6 +133,7 @@ int kernel_interrupts_enabled(void);
 PS2_NORETURN_PRE void kernel_exit(int code) PS2_NORETURN_POST;
 extern int kernel_in_handler;
 void kernel_idle_wait(void);
+int kernel_thread_id(void);
 void cop0_init(void);
 
 /* ------------------------------------------------------------ SIF / IOP HLE */

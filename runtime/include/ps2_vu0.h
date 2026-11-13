@@ -15,7 +15,7 @@
 #define VU_FSF(w) (((w) >> 21) & 3)
 #define VU_FTF(w) (((w) >> 23) & 3)
 
-extern uint8_t *ps2_vu0_mem;     /* 4 KiB data memory (EE 0x11004000) */
+extern PS2_IMPORT uint8_t *ps2_vu0_mem;     /* 4 KiB data memory (EE 0x11004000) */
 
 void vu0_callms(R5900 *c, uint32_t addr);
 uint32_t vu0_cfc2(R5900 *c, int reg);
