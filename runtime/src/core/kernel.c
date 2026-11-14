@@ -493,6 +493,8 @@ void ps2_service(R5900 *c)
                 ps2_log("peek:%s", line);
             }
             be_report();
+            if (!be_iop_lle())
+                sif_rpc_report(0);
             for (int i = 1; i < MAX_THREADS; i++) {
                 ps2_thread *t = threads[i];
                 if (!t || !t->used)
@@ -1309,6 +1311,7 @@ void kernel_exit(int code)
         be_save_frame(ps2_cfg.dump_frame);
     if (ps2_verbose)
         ps2_log("guest exited with code %d", code);
+    sif_rpc_report(1);
     be_shutdown(code);
     ExitProcess((UINT)code);
 }

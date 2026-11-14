@@ -112,6 +112,15 @@ void NativeHostMain::SaveScreenshot(const char* path)
 	// Captured by the GS at its next vsync; Shutdown() waits for the writer.
 	if (MTGS::IsOpen())
 	{
+		// The writer opens the file through FileSystem::GetWin32Path, which makes absolute
+		// paths "\\?\" extended-length paths: there '/' is not a separator and the save
+		// fails.  Use a native (backslash) absolute path and make sure its folder exists.
+		std::string native = Path::ToNativePath(path);
+		if (!Path::IsAbsolute(native))
+			native = Path::Canonicalize(Path::Combine(FileSystem::GetWorkingDirectory(), native));
+		if (const std::string_view dir = Path::GetDirectory(native); !dir.empty())
+			FileSystem::CreateDirectoryPath(std::string(dir).c_str(), true);
+		path = native.c_str();
 		// PS2NATIVE_GSDUMP=N (debugging): also record a GS dump of the next N frames next to the PNG.
 		static const u32 gsdump_frames = [] {
 			const char* env = std::getenv("PS2NATIVE_GSDUMP");
@@ -119,6 +128,18 @@ void NativeHostMain::SaveScreenshot(const char* path)
 		}();
 		MTGS::RunOnGSThread([p = std::string(path)]() { GSQueueSnapshot(p, gsdump_frames); });
 	}
+}
+
+// Per-frame test hooks shared by native and --reference runs: called once per new
+// g_FrameCount value, before the IOP's vblank-start interrupt of that frame polls the pad.
+void NativeHostMain::OnNewFrame(u32 frame)
+{
+	ScriptedInput(frame);
+	// Debugging: PS2NATIVE_DUMP_EVERY=N PS2NATIVE_DUMP_DIR=dir saves a frame every N vblanks.
+	static const u32 every = [] { const char* e = std::getenv("PS2NATIVE_DUMP_EVERY"); return e ? static_cast<u32>(std::atoi(e)) : 0u; }();
+	static const char* dir = std::getenv("PS2NATIVE_DUMP_DIR");
+	if (every && dir && dir[0] && frame % every == 0)
+		SaveScreenshot(Path::Combine(dir, fmt::format("f{:05}.png", frame)).c_str());
 }
 
 void NativeHostMain::Shutdown()
@@ -138,6 +159,19 @@ void NativeHostMain::Shutdown()
 void Host::PumpMessagesOnCPUThread()
 {
 	NativeHostMain::ProcessCPUThreadQueue();
+	if (ps2_cfg.reference)
+	{
+		// Called from VSyncStart (PollInputOnCPUThread), before psxVBlankStart raises the
+		// IOP vblank interrupt that drives the pad poll.  Native runs call OnNewFrame from
+		// be_update right after VSyncEnd bumped g_FrameCount, i.e. earlier in the same frame
+		// and also before that poll, so a press at frame N is first seen by the same poll.
+		static u32 s_ref_last_frame = ~0u;
+		if (g_FrameCount != s_ref_last_frame)
+		{
+			s_ref_last_frame = g_FrameCount;
+			NativeHostMain::OnNewFrame(g_FrameCount);
+		}
+	}
 	if (ps2_cfg.reference && ps2_cfg.max_frames)
 	{
 		// Reference runs: same --frames / --dump-frame behaviour as native runs.

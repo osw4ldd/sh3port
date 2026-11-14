@@ -143,6 +143,12 @@ uint32_t sif_get_reg(uint32_t reg);
 void sif_set_reg(uint32_t reg, uint32_t val);
 void sif_dchain(void);
 void sif_poll(void);
+/* HLE IOP RPC coverage table per (SID, fno); final = 1 at exit, 0 for the
+ * periodic --trace report.  Prints nothing when no RPC reached the HLE IOP. */
+void sif_rpc_report(int final);
+/* Called by an HLE RPC service from its catch-all (unhandled fno) branch:
+ * the current call is reported as class "default". */
+void sif_rpc_mark_default(void);
 /* Real-IOP mode: EE kernel SIF services on top of the hardware SIF DMA. */
 int sif_lle_set_dma(uint32_t transfers, int count);
 int sif_lle_dma_stat(int id);

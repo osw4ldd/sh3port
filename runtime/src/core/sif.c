@@ -9,6 +9,10 @@
  *
  * Servers: fileio (0x80000001), iopheap (0x80000003), loadfile
  * (0x80000006).  Unknown servers bind successfully and answer zeros.
+ *
+ * RPC coverage (sif_rpc_report): every bind / call is counted per (SID, fno)
+ * with the handler that answered it, so calls that fall through to the
+ * zero-reply fallback by accident stand out from deliberately silent ones.
  */
 #include "../internal.h"
 #include <ctype.h>
@@ -42,6 +46,9 @@ static int ee_ready = 1;
 static uint32_t sif_regs[8];          /* 1 mainaddr, 2 subaddr, 3 msflag, 4 smflag */
 static uint32_t sif_sysregs[8];       /* 0x80000000 + n */
 static uint32_t dma_id;
+/* RPC coverage: set by the default (unhandled fno) branch of a real service
+ * while it answers an RPC call; cleared before every call. */
+static int rpc_fallthrough;
 /* IOP heap (sceSifAllocIopHeap / sceSifFreeIopHeap): first fit over the
  * IOP RAM not used by the HLE (no IRX code lives there).  Games allocate and
  * free large stream buffers (SH3: 266 KB, 160 KB, ...). */
@@ -468,6 +475,7 @@ static int32_t fio_call(uint32_t fno, uint8_t *arg, uint32_t ssize)
     }
     default: {
         char key[32];
+        rpc_fallthrough = 1;
         snprintf(key, sizeof key, "fio%u", fno);
         ps2_warn_once(key, "fileio RPC function %u not implemented", fno);
         return -48;
@@ -483,12 +491,14 @@ typedef int32_t (*server_fn)(uint32_t fno, uint8_t *arg, uint32_t ssize, uint8_t
                              uint32_t *reply_size);
 
 server_fn iop_service_for_sid(uint32_t sid);   /* iop_services.c */
+const char *iop_service_name(uint32_t sid);    /* iop_services.c */
 int iop_dtx_dma(uint32_t ee_src, uint32_t iop_dest, uint32_t size);
 
 typedef struct server {
     uint32_t sid;
     server_fn fn;
     uint32_t sd, buf;
+    const char *name;   /* handler name for the RPC coverage report */
 } server;
 
 static int32_t srv_fileio(uint32_t fno, uint8_t *arg, uint32_t ssize, uint8_t *reply, uint32_t *rsz)
@@ -531,6 +541,7 @@ static int32_t srv_iopheap(uint32_t fno, uint8_t *arg, uint32_t ssize, uint8_t *
         break;
     }
     default:
+        rpc_fallthrough = 1;
         break;
     }
     wr32le(reply, r);
@@ -577,6 +588,7 @@ static int32_t srv_loadfile(uint32_t fno, uint8_t *arg, uint32_t ssize, uint8_t 
         wr32le(reply, (uint32_t)-203);
         return -203;
     default:
+        rpc_fallthrough = 1;
         return 0;
     }
 }
@@ -605,19 +617,218 @@ static server *server_for_sid(uint32_t sid)
     s->sd = IOP_SERVER_BASE + (uint32_t)nservers * 0x100;
     s->buf = IOP_BUF_BASE + (uint32_t)nservers * IOP_BUF_SIZE;
     switch (sid) {
-    case 0x80000001: s->fn = srv_fileio; break;
-    case 0x80000003: s->fn = srv_iopheap; break;
-    case 0x80000006: s->fn = srv_loadfile; break;
+    case 0x80000001: s->fn = srv_fileio; s->name = "fileio"; break;
+    case 0x80000003: s->fn = srv_iopheap; s->name = "iopheap"; break;
+    case 0x80000006: s->fn = srv_loadfile; s->name = "loadfile"; break;
     default:
         s->fn = iop_service_for_sid(sid);
+        s->name = iop_service_name(sid);
         if (!s->fn) {
             s->fn = srv_dummy;
+            s->name = "dummy";
             ps2_log("IOP RPC server 0x%08X is not emulated; calls will return zeros", sid);
+        } else if (!s->name) {
+            s->name = "service";
         }
         break;
     }
     nservers++;
     return s;
+}
+
+/* ============================================================ RPC coverage */
+/* S1-T1.  Counted for every bind / call the HLE IOP receives (one hash probe
+ * per RPC, so it is always on); printed by sif_rpc_report().  Classes, in
+ * increasing order of concern (a (SID, fno) row keeps the worst one seen):
+ *   ok       a real service handled the function
+ *   silent   srv_dummy, but the SID/fno is on rpc_silent[] (zeros on purpose)
+ *   default  a real service, but its "unknown fno" branch answered
+ *   DUMMY    srv_dummy by accident: the server is not emulated at all
+ *   NOSERVER the call named a server descriptor that is not bound now; the
+ *            row carries the SID last bound to that descriptor (handler
+ *            "stale-sd", e.g. after an IOP reset) or, if it was never
+ *            bound, the descriptor address itself (handler "unbound-sd")
+ * Rows of class default and above are flagged with '!'. */
+enum { RPC_OK, RPC_SILENT, RPC_DEFAULT, RPC_DUMMY, RPC_NOSERVER, RPC_NCLASS };
+static const char *const rpc_class_name[RPC_NCLASS] = {"ok", "silent", "default", "DUMMY", "NOSERVER"};
+#define RPC_ANY_FNO 0xFFFFFFFFu
+
+/* Servers deliberately answered with zeros by srv_dummy (keep the reason). */
+static const struct { uint32_t sid, fno; const char *why; } rpc_silent[] = {
+    {0x80000701u, RPC_ANY_FNO, "sdrdrv (libsd RPC): zeros until the sound HLE"},
+};
+
+static const char *rpc_silent_reason(uint32_t sid, uint32_t fno)
+{
+    for (size_t i = 0; i < sizeof rpc_silent / sizeof rpc_silent[0]; i++)
+        if (rpc_silent[i].sid == sid &&
+            (rpc_silent[i].fno == RPC_ANY_FNO || fno == RPC_ANY_FNO || rpc_silent[i].fno == fno))
+            return rpc_silent[i].why;
+    return NULL;
+}
+
+typedef struct rpc_stat {
+    uint32_t sid, fno;      /* bind rows: fno = 0 */
+    uint32_t count;
+    const char *handler;
+    uint8_t cls, used, bind;
+} rpc_stat;
+
+#define RPC_STAT_SLOTS 512
+static rpc_stat rpc_stats[RPC_STAT_SLOTS];
+static uint32_t rpc_nrows, rpc_calls, rpc_binds, rpc_lost;
+static uint32_t rpc_class_calls[RPC_NCLASS], rpc_class_binds[RPC_NCLASS];
+static int rpc_new_rows;    /* a row appeared or got worse since the last report */
+
+/* Services in iop_services.c call this from their catch-all branch, so the
+ * call is counted as class "default". */
+void sif_rpc_mark_default(void) { rpc_fallthrough = 1; }
+
+/* Every descriptor ever handed out, with its SID (survives IOP resets), to
+ * name the SID of NOSERVER calls. */
+static struct { uint32_t sd, sid; } rpc_sd_hist[MAX_SERVERS];
+static int rpc_nsd_hist;
+
+static void rpc_sd_remember(uint32_t sd, uint32_t sid)
+{
+    int i = 0;
+    while (i < rpc_nsd_hist && rpc_sd_hist[i].sd != sd)
+        i++;
+    if (i == rpc_nsd_hist) {
+        if (rpc_nsd_hist >= MAX_SERVERS)
+            return;
+        rpc_nsd_hist++;
+    }
+    rpc_sd_hist[i].sd = sd;
+    rpc_sd_hist[i].sid = sid;
+}
+
+/* SID for a call to an unbound descriptor; *stale = 1 if it was bound once. */
+static uint32_t rpc_sd_sid(uint32_t sd, int *stale)
+{
+    for (int i = 0; i < rpc_nsd_hist; i++)
+        if (rpc_sd_hist[i].sd == sd) {
+            *stale = 1;
+            return rpc_sd_hist[i].sid;
+        }
+    *stale = 0;
+    return sd;
+}
+
+static int rpc_server_class(const server *s, uint32_t fno)
+{
+    if (!s)
+        return RPC_NOSERVER;
+    if (s->fn == srv_dummy)
+        return rpc_silent_reason(s->sid, fno) ? RPC_SILENT : RPC_DUMMY;
+    return RPC_OK;
+}
+
+static void rpc_count(uint32_t sid, uint32_t fno, int bind, const char *handler, int cls)
+{
+    uint32_t h = (sid * 2654435761u) ^ (fno * 40503u) ^ (uint32_t)bind;
+    if (bind) {
+        rpc_binds++;
+        rpc_class_binds[cls]++;
+    } else {
+        rpc_calls++;
+        rpc_class_calls[cls]++;
+    }
+    for (uint32_t i = 0; i < RPC_STAT_SLOTS; i++) {
+        rpc_stat *e = &rpc_stats[(h + i) % RPC_STAT_SLOTS];
+        if (!e->used) {
+            e->used = 1;
+            e->sid = sid;
+            e->fno = fno;
+            e->bind = (uint8_t)bind;
+            e->count = 0;
+            e->handler = handler;
+            e->cls = (uint8_t)cls;
+            rpc_nrows++;
+            rpc_new_rows = 1;
+        } else if (e->sid != sid || e->fno != fno || e->bind != (uint8_t)bind) {
+            continue;
+        }
+        e->count++;
+        if (cls > e->cls) {
+            e->cls = (uint8_t)cls;
+            e->handler = handler;
+            rpc_new_rows = 1;
+        }
+        return;
+    }
+    rpc_lost++;
+}
+
+static int rpc_stat_cmp(const void *a, const void *b)
+{
+    const rpc_stat *x = *(const rpc_stat *const *)a, *y = *(const rpc_stat *const *)b;
+    if (x->sid != y->sid)
+        return x->sid < y->sid ? -1 : 1;
+    if (x->bind != y->bind)   /* bind row first, then the calls */
+        return x->bind ? -1 : 1;
+    if (x->fno != y->fno)
+        return x->fno < y->fno ? -1 : 1;
+    return 0;
+}
+
+/* Prints the coverage table (HLE IOP only; nothing was counted in LLE).
+ *   final = 0: periodic --trace report: summary line, table only when a
+ *              row appeared or changed class since the last report.
+ *   final = 1: exit: full table with --trace or PS2NATIVE_RPCLOG=1;
+ *              otherwise only the flagged rows, and only if there are any.
+ * Row format (one per (SID, fno), sorted by SID then fno; fno also in
+ * decimal as the LLE "rpc call sid=%08X fno=%u" log prints it):
+ *   rpccov call sid=80000001 fno=0x00000017 (23) count=139 handler=fileio class=default !
+ *   rpccov bind sid=80000701 count=1 handler=dummy class=silent  # reason */
+void sif_rpc_report(int final)
+{
+    static int rpclog = -1;
+    static const rpc_stat *rows[RPC_STAT_SLOTS];
+    if (rpclog < 0)
+        rpclog = getenv("PS2NATIVE_RPCLOG") != NULL;
+    if (!rpc_nrows)
+        return;
+    uint32_t flagged = rpc_class_calls[RPC_DEFAULT] + rpc_class_calls[RPC_DUMMY] +
+                       rpc_class_calls[RPC_NOSERVER];
+    uint32_t flagged_binds = rpc_class_binds[RPC_DEFAULT] + rpc_class_binds[RPC_DUMMY] +
+                             rpc_class_binds[RPC_NOSERVER];
+    uint32_t flagged_rows = 0;
+    for (int i = 0; i < RPC_STAT_SLOTS; i++)
+        if (rpc_stats[i].used && rpc_stats[i].cls >= RPC_DEFAULT)
+            flagged_rows++;
+    int all = ps2_cfg.trace_syscalls || rpclog;
+    if (final ? (!all && !flagged_rows) : !all)
+        return;
+    ps2_log("rpccov summary %s: calls=%u binds=%u rows=%u flagged_rows=%u flagged_calls=%u "
+            "(ok %u, silent %u, default %u, DUMMY %u, NOSERVER %u) flagged_binds=%u "
+            "(DUMMY %u, NOSERVER %u) lost=%u",
+            final ? "exit" : "periodic", rpc_calls, rpc_binds, rpc_nrows, flagged_rows, flagged,
+            rpc_class_calls[RPC_OK], rpc_class_calls[RPC_SILENT], rpc_class_calls[RPC_DEFAULT],
+            rpc_class_calls[RPC_DUMMY], rpc_class_calls[RPC_NOSERVER], flagged_binds,
+            rpc_class_binds[RPC_DUMMY], rpc_class_binds[RPC_NOSERVER], rpc_lost);
+    if (!final && !rpc_new_rows)
+        return;
+    rpc_new_rows = 0;
+    int n = 0;
+    for (int i = 0; i < RPC_STAT_SLOTS; i++)
+        if (rpc_stats[i].used && (all || rpc_stats[i].cls >= RPC_DEFAULT))
+            rows[n++] = &rpc_stats[i];
+    qsort(rows, (size_t)n, sizeof rows[0], rpc_stat_cmp);
+    for (int i = 0; i < n; i++) {
+        const rpc_stat *e = rows[i];
+        const char *why =
+            e->cls == RPC_SILENT ? rpc_silent_reason(e->sid, e->bind ? RPC_ANY_FNO : e->fno) : NULL;
+        if (e->bind)
+            ps2_log("rpccov bind sid=%08X count=%u handler=%s class=%s%s%s%s", e->sid, e->count,
+                    e->handler, rpc_class_name[e->cls], e->cls >= RPC_DEFAULT ? " !" : "",
+                    why ? "  # " : "", why ? why : "");
+        else
+            ps2_log("rpccov call sid=%08X fno=0x%08X (%u) count=%u handler=%s class=%s%s%s%s", e->sid,
+                    e->fno, e->fno, e->count, e->handler, rpc_class_name[e->cls],
+                    e->cls >= RPC_DEFAULT ? " !" : "", why ? "  # " : "", why ? why : "");
+    }
+    ps2_log("rpccov end");
 }
 
 static server *server_for_sd(uint32_t sd)
@@ -675,6 +886,9 @@ static void iop_command(const uint8_t *pkt)
     case SIF_CMD_RPC_BIND: {
         uint32_t sid = rd32le(pkt + 32);
         server *s = server_for_sid(sid);
+        rpc_count(sid, 0, 1, s ? s->name : "none", s ? rpc_server_class(s, RPC_ANY_FNO) : RPC_NOSERVER);
+        if (s)
+            rpc_sd_remember(s->sd, sid);
         send_rpc_end(pkt, SIF_CMD_RPC_BIND, s ? s->sd : 0, s ? s->buf : 0, NULL, 0, 0);
         break;
     }
@@ -686,8 +900,21 @@ static void iop_command(const uint8_t *pkt)
         static uint8_t reply[0x10000];
         uint32_t rlen = 0;
         memset(reply, 0, rsize < sizeof reply ? rsize : sizeof reply);
+        rpc_fallthrough = 0;
         if (s)
             s->fn(fno, iop_ptr(s->buf), ssize, reply, &rlen);
+        {
+            int cls = rpc_server_class(s, fno);
+            if (cls == RPC_OK && rpc_fallthrough)
+                cls = RPC_DEFAULT;
+            if (s) {
+                rpc_count(s->sid, fno, 0, s->name, cls);
+            } else {
+                int stale;
+                uint32_t nsid = rpc_sd_sid(sd, &stale);
+                rpc_count(nsid, fno, 0, stale ? "stale-sd" : "unbound-sd", cls);
+            }
+        }
         if (rsize > sizeof reply)
             rsize = sizeof reply;
         if (rmode) {

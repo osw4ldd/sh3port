@@ -89,5 +89,6 @@ namespace NativeHostMain
 	void SaveScreenshot(const char* path);
 	void OnControllerChanged();
 	void ScriptedInput(uint32_t frame);
+	void OnNewFrame(uint32_t frame); // scripted input + periodic frame dumps (native and --reference)
 	void Shutdown();
 }

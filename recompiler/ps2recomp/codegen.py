@@ -356,6 +356,37 @@ def branch_cond(ins):
 
 
 # ------------------------------------------------------------- functions
+_RA_LOADS = {"lb", "lbu", "lh", "lhu", "lw", "lwu", "lwl", "lwr", "ld", "ldl", "ldr", "lq"}
+_COP_TO_GPR = {"mfc0", "mfc1", "cfc1", "qmfc2", "cfc2"}
+
+
+def writes_ra_noncall(ins):
+    """True if `ins` writes ra other than by linking (jal/bal/bltzal/jalr ra) and other
+    than the usual epilogue restore from the stack (load with base sp).  Such a write
+    can make `jr ra` jump somewhere that is not the caller, e.g. the "fake return
+    address" tail loops of SH3's quicksorts (0x139E98: lui/addiu ra, 0x139D48)."""
+    if ins.kind != K_NORMAL:
+        return False
+    op, n = ins.op, ins.name
+    if op == 0:
+        dst = ins.rd if n not in ("mult", "multu", "div", "divu", "mthi", "mtlo", "sync",
+                                  "mtsa", "tge", "tgeu", "tlt", "tltu", "teq", "tne",
+                                  "nop") else None
+    elif op == 28:
+        dst = ins.rd
+    elif n in _COP_TO_GPR:
+        dst = ins.rt
+    elif op in (8, 9, 10, 11, 12, 13, 14, 15, 24, 25) or n in _RA_LOADS:
+        dst = ins.rt
+    else:
+        dst = None
+    if dst != 31:
+        return False
+    if n in _RA_LOADS and ins.rs == 29:
+        return False
+    return True
+
+
 class FunctionEmitter:
     def __init__(self, prog, func, known_funcs, options):
         self.prog = prog
@@ -420,7 +451,19 @@ class FunctionEmitter:
         self.out.append("{")
         self.has_reg_jr = any(self.prog.insn(a).kind == K_JR and self.prog.insn(a).rs != 31
                               for a in f.insns)
-        if self.has_reg_jr:
+        # ra written by something other than a call: `jr ra` may target this function
+        # itself (or anywhere), so it cannot simply be a C return.
+        ra_writes = [a for a in f.insns if writes_ra_noncall(self.prog.insn(a))]
+        self.ra_dynamic = bool(ra_writes) and any(
+            self.prog.insn(a).kind == K_JR and self.prog.insn(a).rs == 31 for a in f.insns)
+        self.ra_targets = set()
+        if self.ra_dynamic:
+            for a in ra_writes:
+                v = self.prog._resolve_const(31, a + 4)
+                if v is not None and v in f.insns:
+                    self.ra_targets.add(v)
+            self.ra_targets |= {s for s in f.secondary if s in f.insns}
+        if self.has_reg_jr or self.ra_dynamic:
             # "move t4, ra; ...; jr t4" style returns compare against this.
             self.w("const uint32_t entry_ra = c->r[31].UW[0];")
         if f.secondary:
@@ -514,13 +557,25 @@ class FunctionEmitter:
             return a + 8
 
         if k == K_JR:
-            if ins.rs == 31:
+            if ins.rs == 31 and not self.ra_dynamic:
                 self.w(self.delay_code(a))
                 self.w("return;")
                 return None
             self.w("{")
             self.w(f"uint32_t t = {U32(ins.rs)};", 2)
             self.w(self.delay_code(a), 2)
+            if ins.rs == 31:
+                # ra may hold an address inside this function (fake return address)
+                if self.ra_targets:
+                    self.w("if (t != entry_ra) switch (t) {", 2)
+                    for t in sorted(self.ra_targets):
+                        self.w(f"case {_hex(t)}: goto {lbl(t)};", 3)
+                    self.w("default: break;", 3)
+                    self.w("}", 2)
+                self.w("if (t == entry_ra) return;", 2)
+                self.w("ps2_jump(c, t); return;", 2)
+                self.w("}")
+                return None
             table = sorted(set(self.f.jumptables.get(a, ())))
             if table:
                 self.w("switch (t) {", 2)

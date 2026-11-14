@@ -41,6 +41,8 @@ static int32_t srv_sh3_sound(uint32_t fno, uint8_t *arg, uint32_t ssize, uint8_t
         }
         wr32le(reply + 4, status);
         wr32le(reply + 24, 0xFF);
+    } else if (fno != 0x02000000u) {
+        sif_rpc_mark_default();   /* only the bank load answers zeros on purpose */
     }
     *rsz = 32;
     return 0;
@@ -102,6 +104,8 @@ static int32_t srv_cri_adx(uint32_t fno, uint8_t *arg, uint32_t ssize, uint8_t *
     if (fno == 2 || fno == 0x422 || fno == 0x400 || fno == 0x408) {
         r = next;
         next += 0x40;
+    } else {
+        sif_rpc_mark_default();   /* "others -> 0": not emulated, just acknowledged */
     }
     wr32le(reply, r);
     *rsz = 4;
@@ -111,11 +115,70 @@ static int32_t srv_cri_adx(uint32_t fno, uint8_t *arg, uint32_t ssize, uint8_t *
     return (int32_t)r;
 }
 
+/* SID 0x80000400: mcserv (memory card).  Stopgap until the function-level
+ * libmc HLE (S1-T3, hle_mc.c): both slots report "no card".  Replies from
+ * the LLE log (build/verify/2026-11-14-s1t1-verify/lle_rpc_3000.log):
+ *   fno 254 init/version check, send zeros     -> {0, 0x210, 0x222} (rsz 12);
+ *           sceMcInit (0x10BA78) needs mcserv >= 0x20A and mcman >= 0x20E,
+ *           otherwise it unbinds the client and returns -120 (the SH3
+ *           memory card thread then spins on sceMcGetSlotMax, S1-B1).
+ *   fno 21  sceMcGetSlotMax {_, port}           -> 1 (both ports)
+ *   fno 1   sceMcGetInfo {_, port, slot, want type/free/format, _, ee buf}
+ *           -> -11 (LLE answer for the empty port 1; port 0 had a card).
+ *           The end callback (0x10C580) copies type/free/format out of the
+ *           EE buffer at send+0x1C, so it is zeroed (0x94 bytes).
+ *   others  -> -11 (no card), reported as "default". */
+static int32_t srv_mcserv(uint32_t fno, uint8_t *arg, uint32_t ssize, uint8_t *reply,
+                          uint32_t *rsz)
+{
+    uint32_t r;
+    *rsz = 4;
+    switch (fno) {
+    case 254:
+        wr32le(reply + 0, 0);
+        wr32le(reply + 4, 0x210);
+        wr32le(reply + 8, 0x222);
+        *rsz = 12;
+        return 0;
+    case 21:
+        r = 1;
+        break;
+    case 1: {
+        static const uint8_t zero[0x94];
+        uint32_t buf = ssize >= 0x20 ? rd32le(arg + 0x1C) : 0;
+        if (buf)
+            ps2_mem_write(buf, zero, sizeof zero);
+        r = (uint32_t)-11;
+        break;
+    }
+    default:
+        sif_rpc_mark_default();
+        r = (uint32_t)-11;
+        break;
+    }
+    wr32le(reply, r);
+    if (ps2_cfg.trace_syscalls)
+        ps2_log("mcserv rpc fno=%u port %u -> %d", fno, ssize >= 8 ? rd32le(arg + 4) : 0, (int32_t)r);
+    return (int32_t)r;
+}
+
 server_fn iop_service_for_sid(uint32_t sid)
 {
     switch (sid) {
     case 0x00000057u: return srv_sh3_sound;
     case 0x7D000000u: return srv_cri_adx;
+    case 0x80000400u: return srv_mcserv;
+    default: return NULL;
+    }
+}
+
+/* Handler name for the RPC coverage report (sif.c sif_rpc_report). */
+const char *iop_service_name(uint32_t sid)
+{
+    switch (sid) {
+    case 0x00000057u: return "sh3_sound";
+    case 0x7D000000u: return "cri_adx";
+    case 0x80000400u: return "mcserv";
     default: return NULL;
     }
 }

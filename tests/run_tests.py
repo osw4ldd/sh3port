@@ -72,6 +72,12 @@ def test_cpu():
 
 
 @test
+def test_fake_ra():
+    """S0-B1: jr ra to a fake in-function return address (SH3 quicksort pattern)."""
+    return build_and_run("fake_ra", programs_sys.build_fake_ra_test)
+
+
+@test
 def test_cpu_stripped():
     # Same program without a symbol table: functions must be discovered from
     # calls, data pointers and code constants only.

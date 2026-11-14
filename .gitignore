@@ -61,3 +61,6 @@ __pycache__/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Personal Claude Code settings
+.claude/settings.local.json

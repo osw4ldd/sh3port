@@ -131,6 +131,7 @@ void ps2_fatal(const char *fmt, ...)
     vfprintf(stderr, fmt, ap);
     fputc('\n', stderr);
     va_end(ap);
+    sif_rpc_report(1);   /* RPC coverage up to the failure (HLE IOP only) */
     fflush(stdout);
     fflush(stderr);
     ExitProcess(3);

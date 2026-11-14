@@ -560,3 +560,61 @@ def build_vu0_test(path):
     a.dlabel("vdata")
     a.floats(1, 2, 3, 4, 10, 20, 30, 40)
     a.write_elf(path)
+
+
+# =====================================================================
+# Fake return address (S0-B1): a function sets ra to a label inside itself
+# and tail-loops to its own entry, like SH3's quicksorts at 0x139CC0/0x139EB0
+# (0x139E98: lui/addiu ra,0x139D48; b 0x139CC0).  `jr ra` must jump to the
+# in-function epilogue, not return to the C caller.
+#   fsort(a0 = depth) on the private stack s6:
+#     entry: if a0 == 0: jr ra
+#            push ra; a0--; if a0 == 0 goto pop; ra = &pop; b entry
+#     pop:   s1++; pop ra; jr ra
+# With a0 = 2 the frame is nested once: pop runs twice and s6 is restored.
+# =====================================================================
+def build_fake_ra_test(path):
+    a = Asm()
+    k = Checker(a)
+    prologue(a)
+    a.la("s6", "fake_ra_stack_top")
+    a.move("s5", "s6")
+    a.li("s1", 0)
+    a.li("a0", 2)
+    a.jal("fsort")
+    a.nop()
+    k.eq("s1", 2, "fake_ra_pops")
+    a.subu("t0", "s6", "s5")
+    k.eq("t0", 0, "fake_ra_stack_balanced")
+    a.li("s1", 0)
+    a.li("a0", 0)                    # no frame: plain return
+    a.jal("fsort")
+    a.nop()
+    k.eq("s1", 0, "fake_ra_leaf")
+    epilogue(a)
+
+    a.func("fsort")
+    a.beqz("a0", "fsort_ret")
+    a.nop()
+    a.addiu("s6", "s6", -16)
+    a.sw("ra", 0, "s6")
+    a.addiu("a0", "a0", -1)
+    a.beqz("a0", "fsort_pop")        # nothing left: straight to the epilogue
+    a.nop()                          # (keeps fsort_pop inside fsort, as at 0x139E90)
+    a.la_addiu("ra", "fsort_pop")    # fake return address inside this function
+    a.b("fsort")
+    a.nop()
+    a.label("fsort_pop")
+    a.addiu("s1", "s1", 1)
+    a.lw("ra", 0, "s6")
+    a.jr("ra")
+    a.addiu("s6", "s6", 16)
+    a.label("fsort_ret")
+    a.jr("ra")
+    a.nop()
+
+    a.dalign(16)
+    a.space(256)
+    a.dlabel("fake_ra_stack_top")
+    a.space(16)
+    a.write_elf(path)

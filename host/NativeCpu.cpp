@@ -676,14 +676,7 @@ void be_update(void)
 	{
 		s_last_frame = g_FrameCount;
 		NativeHostMain::ProcessCPUThreadQueue();
-		NativeHostMain::ScriptedInput(g_FrameCount);
-		{
-			// Debugging: PS2NATIVE_DUMP_EVERY=N PS2NATIVE_DUMP_DIR=dir saves a frame every N vblanks.
-			static const u32 every = [] { const char* e = std::getenv("PS2NATIVE_DUMP_EVERY"); return e ? static_cast<u32>(std::atoi(e)) : 0u; }();
-			static const char* dir = std::getenv("PS2NATIVE_DUMP_DIR");
-			if (every && dir && g_FrameCount % every == 0)
-				NativeHostMain::SaveScreenshot(fmt::format("{}/f{:05}.png", dir, g_FrameCount).c_str());
-		}
+		NativeHostMain::OnNewFrame(g_FrameCount); // PS2NATIVE_PRESS, PS2NATIVE_DUMP_EVERY
 		handle_vm_state();
 		const double t0 = Now();
 		kernel_on_vblank();
