@@ -11,6 +11,31 @@ from .r5900 import (K_NORMAL, K_BRANCH, K_JUMP, K_CALL, K_JR, K_JALR, K_ERET,
                     K_SYSCALL, K_BREAK, K_INVALID)
 
 
+_CODEGEN_ID = None
+
+
+def codegen_id():
+    """Short hash of everything that decides the generated C and how it compiles:
+    the recompiler modules (decoder, analysis, codegen, dyn) and the runtime headers
+    the generated code includes.  Written into the exe (functable.c, ps2_codegen_id)
+    and into every run-time overlay DLL (ps2dyn_codegen_id) so the runtime can
+    reject DLLs built by an older codegen (dyncache is keyed on guest bytes only)."""
+    global _CODEGEN_ID
+    if _CODEGEN_ID is None:
+        import hashlib
+        from pathlib import Path
+        here = Path(__file__).resolve().parent
+        files = [here / n for n in ("r5900.py", "analysis.py", "codegen.py", "dyn.py")]
+        files += sorted((here.parent.parent / "runtime" / "include").glob("*.h"))
+        h = hashlib.sha1()
+        for p in files:
+            if p.exists():
+                h.update(p.name.encode())
+                h.update(p.read_bytes().replace(b"\r\n", b"\n"))
+        _CODEGEN_ID = h.hexdigest()[:16]
+    return _CODEGEN_ID
+
+
 def fname(addr):
     return f"F_{addr:08X}"
 

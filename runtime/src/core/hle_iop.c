@@ -308,6 +308,17 @@ uint32_t ps2_hle_call_guest(R5900 *c, uint32_t addr, uint32_t a0, uint32_t a1, u
 
 /* ------------------------------------------------------------ dispatch */
 typedef void (*hle_fn)(R5900 *c);
+/* hle_pad.c: libdbc / libpad2 / libvib (S1-T4) */
+void hle_sceDbcInit(R5900 *c);
+void hle_scePad2Init(R5900 *c);
+void hle_scePad2End(R5900 *c);
+void hle_scePad2CreateSocket(R5900 *c);
+void hle_scePad2DeleteSocket(R5900 *c);
+void hle_scePad2GetState(R5900 *c);
+void hle_scePad2GetButtonProfile(R5900 *c);
+void hle_scePad2Read(R5900 *c);
+void hle_sceVibGetProfile(R5900 *c);
+void hle_sceVibSetActParam(R5900 *c);
 static const struct { const char *name; hle_fn fn; } hle_table[] = {
     {"sceOpen", hle_sceOpen},
     {"sceClose", hle_sceClose},
@@ -328,6 +339,16 @@ static const struct { const char *name; hle_fn fn; } hle_table[] = {
     {"sceCdDiskReady", hle_sceCdDiskReady},
     {"sceCdReadClock", hle_sceCdReadClock},
     {"sceCdLayerSearchFile", hle_sceCdLayerSearchFile},
+    {"sceDbcInit", hle_sceDbcInit},
+    {"scePad2Init", hle_scePad2Init},
+    {"scePad2End", hle_scePad2End},
+    {"scePad2CreateSocket", hle_scePad2CreateSocket},
+    {"scePad2DeleteSocket", hle_scePad2DeleteSocket},
+    {"scePad2GetState", hle_scePad2GetState},
+    {"scePad2GetButtonProfile", hle_scePad2GetButtonProfile},
+    {"scePad2Read", hle_scePad2Read},
+    {"sceVibGetProfile", hle_sceVibGetProfile},
+    {"sceVibSetActParam", hle_sceVibSetActParam},
 };
 
 /* Replacements that decide themselves whether to run (any IOP mode); they

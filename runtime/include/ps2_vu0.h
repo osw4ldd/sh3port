@@ -23,6 +23,42 @@ void vu0_ctc2(R5900 *c, int reg, uint32_t v);
 
 static inline int vu0_cpcond2(R5900 *c) { (void)c; return 0; }
 
+/*
+ * MAC / STATUS flags of the FMAC ops (VADD/VSUB/VMUL/VMADD/VMSUB in every form,
+ * VOPMULA/VOPMSUB).  Macro mode updates them immediately, with no 4-cycle flag
+ * pipeline: microVU_Macro.inl setupMacroOp(mode 0x10) writes flag instance 0 and
+ * endMacroOp normalises the status into VI[REG_STATUS_FLAG] after every op.
+ * MAC (mVUupdateFlags, microVU_Upper.inl): for each written field Z (bits 3..0)
+ * and S (bits 7..4), x = high bit; unwritten fields are 0.  U/O are not computed
+ * by microVU (only with the overflow game fix), so they stay 0.
+ * STATUS (mVUallocSFLAGc): Z/S/U/O replaced from the MAC, sticky ZS/SS ORed in,
+ * I/D and the other sticky bits kept.  The flags see the clamped result.
+ * Zero test = exponent 0 (CMPEQ under DAZ also counts denormals as zero).
+ */
+static inline void vu_flags(R5900 *c, uint32_t dest, const float *r)
+{
+    uint32_t mac = 0, s;
+    for (int i = 0; i < 4; i++)
+        if (dest & (8u >> i)) {
+            uint32_t u;
+            memcpy(&u, &r[i], 4);
+            if (u & 0x80000000u) mac |= 0x80u >> i;
+            if (!(u & 0x7F800000u)) mac |= 0x8u >> i;
+        }
+    s = c->vu_status & ~0xFu;
+    if (mac & 0x0Fu) s |= 0x41u;
+    if (mac & 0xF0u) s |= 0x82u;
+    c->vu_mac = mac;
+    c->vu_status = s;
+}
+
+/* FDIV I/D: cleared and set by every DIV/SQRT/RSQRT (microVU_Lower.inl mVU_DIV,
+ * cop2 path: and ~(I|D), or divFlag; divI = I|IS, divD = D|DS). */
+static inline void vu_divflags(R5900 *c, uint32_t f)
+{
+    c->vu_status = (c->vu_status & ~0x30u) | f;
+}
+
 static inline void vu_store(R5900 *c, int reg, uint32_t dest, const float *r)
 {
     if (reg == 0)
@@ -65,7 +101,10 @@ static inline void vu_arith(R5900 *c, uint32_t w, int op, int src, int to_acc)
         case VOP_MAX: r[i] = a > b ? a : b; break;
         default: r[i] = a < b ? a : b; break;
         }
+        r[i] = fpu_clamp(r[i]);
     }
+    if (op != VOP_MAX && op != VOP_MIN)   /* MAX/MINI never touch the flags */
+        vu_flags(c, VU_DEST(w), r);
     if (to_acc)
         vu_store_acc(c, VU_DEST(w), r);
     else
@@ -125,19 +164,32 @@ VU_DEF(VMULAI, VOP_MUL, VSRC_I, 1)
 VU_DEF(VMADDAI, VOP_MADD, VSRC_I, 1)
 VU_DEF(VMSUBAI, VOP_MSUB, VSRC_I, 1)
 
+/* VOPMULA/VOPMSUB: Fs.yzx * Ft.zxy (pshufd 0xC9 / 0xD2 in microVU_Upper.inl, so the
+ * w lane is Fs.w * Ft.w), written and flagged per the instruction's dest field. */
+static inline float vu_opmul(const u128 *s, const u128 *t, int i)
+{
+    static const int si[4] = {1, 2, 0, 3}, ti[4] = {2, 0, 1, 3};
+    return fpu_clamp(fpu_in(s->F[si[i]]) * fpu_in(t->F[ti[i]]));
+}
+
 static inline void VU0_VOPMULA(R5900 *c, uint32_t w)
 {
     const u128 s = c->vf[VU_FS(w)], t = c->vf[VU_FT(w)];
-    float r[4] = {s.F[1] * t.F[2], s.F[2] * t.F[0], s.F[0] * t.F[1], 0};
-    vu_store_acc(c, VU_DEST(w) & 0xE, r);
+    float r[4];
+    for (int i = 0; i < 4; i++)
+        r[i] = vu_opmul(&s, &t, i);
+    vu_flags(c, VU_DEST(w), r);
+    vu_store_acc(c, VU_DEST(w), r);
 }
 
 static inline void VU0_VOPMSUB(R5900 *c, uint32_t w)
 {
     const u128 s = c->vf[VU_FS(w)], t = c->vf[VU_FT(w)];
-    float r[4] = {c->vacc.F[0] - s.F[1] * t.F[2], c->vacc.F[1] - s.F[2] * t.F[0],
-                  c->vacc.F[2] - s.F[0] * t.F[1], 0};
-    vu_store(c, VU_FD(w), VU_DEST(w) & 0xE, r);
+    float r[4];
+    for (int i = 0; i < 4; i++)
+        r[i] = fpu_clamp(fpu_in(c->vacc.F[i]) - vu_opmul(&s, &t, i));
+    vu_flags(c, VU_DEST(w), r);
+    vu_store(c, VU_FD(w), VU_DEST(w), r);
 }
 
 static inline void VU0_VABS(R5900 *c, uint32_t w)
@@ -216,37 +268,55 @@ static inline void VU0_VCLIPW(R5900 *c, uint32_t w)
     c->vu_clip = ((c->vu_clip << 6) | f) & 0xFFFFFF;
 }
 
+/* Zero test of the FDIV ops (testZero: CMPEQ with 0 under DAZ: +-0 and denormals). */
+static inline int vu_is_zero(float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, 4);
+    return !(u & 0x7F800000u);
+}
+
 static inline void VU0_VDIV(R5900 *c, uint32_t w)
 {
     float a = c->vf[VU_FS(w)].F[VU_FSF(w)], b = c->vf[VU_FT(w)].F[VU_FTF(w)];
-    if (b == 0.0f) {
+    if (vu_is_zero(b)) {
         uint32_t ua, ub;
         memcpy(&ua, &a, 4);
         memcpy(&ub, &b, 4);
         c->vq = fpu_signed_max(ua ^ ub);
-        c->vu_status |= a == 0.0f ? 0x10 : 0x20;
+        vu_divflags(c, vu_is_zero(a) ? 0x410u : 0x820u);   /* 0/0: I|IS, x/0: D|DS */
     } else {
         c->vq = fpu_clamp(fpu_in(a) / fpu_in(b));
+        vu_divflags(c, 0);
     }
 }
 
 static inline void VU0_VSQRT(R5900 *c, uint32_t w)
 {
-    c->vq = sqrtf(fabsf(fpu_in(c->vf[VU_FT(w)].F[VU_FTF(w)])));
+    float t = c->vf[VU_FT(w)].F[VU_FTF(w)];
+    uint32_t u;
+    memcpy(&u, &t, 4);
+    vu_divflags(c, (u & 0x80000000u) ? 0x410u : 0);       /* negative (also -0): I|IS */
+    c->vq = sqrtf(fabsf(fpu_in(t)));
 }
 
 static inline void VU0_VRSQRT(R5900 *c, uint32_t w)
 {
     float a = c->vf[VU_FS(w)].F[VU_FSF(w)];
-    float b = fabsf(c->vf[VU_FT(w)].F[VU_FTF(w)]);
-    if (b == 0.0f) {
+    float t = c->vf[VU_FT(w)].F[VU_FTF(w)];
+    float b = fabsf(t);
+    uint32_t ut, f;
+    memcpy(&ut, &t, 4);
+    f = (ut & 0x80000000u) ? 0x410u : 0;                   /* negative: I|IS */
+    if (vu_is_zero(b)) {
         uint32_t ua;
         memcpy(&ua, &a, 4);
         c->vq = fpu_signed_max(ua);
-        c->vu_status |= 0x20;
+        f = vu_is_zero(a) ? 0x410u : 0x820u;               /* replaces the I above */
     } else {
         c->vq = fpu_clamp(fpu_in(a) / sqrtf(fpu_in(b)));
     }
+    vu_divflags(c, f);
 }
 
 static inline void VU0_VWAITQ(R5900 *c, uint32_t w) { (void)c; (void)w; }

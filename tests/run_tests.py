@@ -78,6 +78,12 @@ def test_fake_ra():
 
 
 @test
+def test_vu0_flags():
+    """S0-B4: VU0 macro MAC/STATUS/FDIV flags, cfc2/ctc2 vi16/vi17."""
+    return build_and_run("vu0_flags", programs_sys.build_vu0_flags_test)
+
+
+@test
 def test_cpu_stripped():
     # Same program without a symbol table: functions must be discovered from
     # calls, data pointers and code constants only.

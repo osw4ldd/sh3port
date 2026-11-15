@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .elf import Elf, Segment
 from .analysis import Program
-from .codegen import FunctionEmitter, fname
+from .codegen import FunctionEmitter, fname, codegen_id
 
 PF_R_X = 5
 
@@ -54,6 +54,9 @@ def build_source(data, base, entries, log=print):
         out.append(f"    {{0x{addr:08X}u, {sec}u, {fname(owner)}, {{{w}}}}},")
     out.append("};")
     out.append(f"__declspec(dllexport) const uint32_t ps2dyn_count = {len(table)}u;")
+    # Codegen that built this module; the runtime compares it with the exe's
+    # ps2_codegen_id and ignores stale cached DLLs (see codegen.codegen_id).
+    out.append(f'__declspec(dllexport) const char ps2dyn_codegen_id[] = "{codegen_id()}";')
     return "\n".join(out) + "\n", len(funcs)
 
 

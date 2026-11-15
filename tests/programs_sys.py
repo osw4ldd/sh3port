@@ -618,3 +618,60 @@ def build_fake_ra_test(path):
     a.dlabel("fake_ra_stack_top")
     a.space(16)
     a.write_elf(path)
+
+
+# =====================================================================
+# VU0 macro mode MAC / STATUS / FDIV flags (S0-B4).  PCSX2 microVU macro mode
+# updates them right after each op (microVU_Macro.inl setupMacroOp mode 0x10);
+# SH3 reads them with cfc2 vi16/vi17 after ctc2 zero,vi16 + vsub (cull tests).
+# =====================================================================
+def _vu_fdiv(name, fs, fsf, ft, ftf):
+    idx = {"vdiv": 0x38, "vsqrt": 0x39, "vrsqrt": 0x3A}[name]
+    return ((18 << 26) | (1 << 25) | (ftf << 23) | (fsf << 21) | (ft << 16) | (fs << 11)
+            | ((idx >> 2) << 6) | 0x3C | (idx & 3))
+
+
+def build_vu0_flags_test(path):
+    a = Asm()
+    k = Checker(a)
+    prologue(a)
+    a.la("s1", "vfdata")
+    a.lqc2("vf1", 0, "s1")               # 1 2 3 4
+    a.lqc2("vf2", 16, "s1")              # 2 2 1 4
+    # vsub with a negative x, a zero y and w: MAC = Sx|Zy|Zw, STATUS = Z|S|ZS|SS
+    a.ctc2("zero", 16)
+    a.vsub_xyzw("vf3", "vf1", "vf2")     # (-1, 0, 2, 0)
+    a.cfc2("t0", 17)
+    k.eq("t0", 0x85, "vsub_mac")
+    a.cfc2("t0", 16)
+    k.eq("t0", 0xC3, "vsub_status")
+    # only x written and positive: MAC 0, Z/S cleared, sticky ZS/SS kept
+    a.vadd_x("vf4", "vf1", "vf1")
+    a.cfc2("t0", 17)
+    k.eq("t0", 0, "vadd_x_mac")
+    a.cfc2("t0", 16)
+    k.eq("t0", 0xC0, "vadd_x_status_sticky")
+    # ctc2 vi16 writes only the sticky bits
+    a.vsub_xyzw("vf3", "vf1", "vf2")     # Z S ZS SS again
+    a.ctc2("zero", 16)
+    a.cfc2("t0", 16)
+    k.eq("t0", 0x03, "ctc2_keeps_nonsticky")
+    a.li("t1", 0xFFF)
+    a.ctc2("t1", 16)
+    a.cfc2("t0", 16)
+    k.eq("t0", 0xFC3, "ctc2_writes_sticky")
+    # vdiv by zero sets D|DS; a normal vdiv clears D, DS stays
+    a.ctc2("zero", 16)
+    a.emit(_vu_fdiv("vdiv", 1, 0, 0, 0))   # 1 / vf0.x (0)
+    a.cfc2("t0", 16)
+    a.andi("t0", "t0", 0xC30)
+    k.eq("t0", 0x820, "vdiv0_D")
+    a.emit(_vu_fdiv("vdiv", 1, 0, 2, 1))   # 1 / 2
+    a.cfc2("t0", 16)
+    a.andi("t0", "t0", 0xC30)
+    k.eq("t0", 0x800, "vdiv_clears_D")
+    epilogue(a)
+    a.dalign(16)
+    a.dlabel("vfdata")
+    a.floats(1, 2, 3, 4, 2, 2, 1, 4)
+    a.write_elf(path)

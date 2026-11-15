@@ -12,6 +12,7 @@ add_library(ps2native-rt STATIC
 	"${PS2NATIVE_RUNTIME}/src/core/dyn.c"
 	"${PS2NATIVE_RUNTIME}/src/core/iso.c"
 	"${PS2NATIVE_RUNTIME}/src/core/hle_iop.c"
+	"${PS2NATIVE_RUNTIME}/src/core/hle_pad.c"
 	"${PS2NATIVE_RUNTIME}/src/core/iop_services.c"
 	"${PS2NATIVE_RUNTIME}/src/core/hle_mpeg.c"
 	"${PS2NATIVE_RUNTIME}/src/core/mpeg_native.c"

@@ -255,7 +255,8 @@ void vu0_ctc2(R5900 *c, int reg, uint32_t v)
         return;
     }
     switch (reg) {
-    case 16: c->vu_status = v & 0xFC0; break;
+    /* only the sticky bits are writable (microVU_Macro.inl recCTC2 REG_STATUS_FLAG) */
+    case 16: c->vu_status = (c->vu_status & 0x3F) | (v & 0xFC0); break;
     case 18: c->vu_clip = v & 0xFFFFFF; break;
     case 20: c->vu_r = 0x3F800000u | (v & 0x7FFFFF); break;
     case 21: memcpy(&c->vi_reg, &v, 4); break;

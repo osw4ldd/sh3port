@@ -27,6 +27,10 @@
 #include "pcsx2/MTGS.h"
 #include "pcsx2/Gif_Unit.h"
 #include "pcsx2/VMManager.h"
+#include "pcsx2/Input/InputManager.h"
+#include "pcsx2/SIO/Sio.h"
+#include "pcsx2/SIO/Pad/Pad.h"
+#include "pcsx2/SIO/Pad/PadDualshock2.h"
 #include "common/Console.h"
 
 #include "NativeHost.h"
@@ -771,6 +775,50 @@ int be_should_quit(void) { return s_quit.load() ? 1 : 0; }
 void be_save_frame(const char* path)
 {
 	NativeHostMain::SaveScreenshot(path);
+}
+
+// HLE pad (runtime/src/core/hle_pad.c): the DualShock 2 report of a port, built from
+// the same PCSX2 pad object (InputManager bindings, ScriptedInput) the LLE SIO2 path
+// reads.  Byte order follows PadDualshock2::Poll (SIO/Pad/PadDualshock2.cpp): command
+// bytes 3/4 = buttons >> 8 / buttons & 0xFF (active low), 5-8 = RX RY LX LY, 9-20 =
+// pressures RIGHT LEFT UP DOWN TRIANGLE CIRCLE CROSS SQUARE L1 R1 L2 R2, each 0 unless
+// the button bit is pressed.  Only DualShock 2 pads are reported as connected.
+int be_pad_read(int port, uint8_t* ds2)
+{
+	if (port < 0 || port > 1)
+		return 0;
+	PadBase* pad = Pad::GetPad(static_cast<u8>(port), 0);
+	if (!pad || pad->GetType() != Pad::ControllerType::DualShock2)
+		return 0;
+	using In = PadDualshock2::Inputs;
+	const u32 buttons = pad->GetButtons();
+	ds2[0] = static_cast<u8>((buttons >> 8) & 0xFF);
+	ds2[1] = static_cast<u8>(buttons & 0xFF);
+	ds2[2] = pad->GetPressure(In::PAD_R_RIGHT); // RX
+	ds2[3] = pad->GetPressure(In::PAD_R_UP);    // RY
+	ds2[4] = pad->GetPressure(In::PAD_L_RIGHT); // LX
+	ds2[5] = pad->GetPressure(In::PAD_L_UP);    // LY
+	static constexpr std::pair<u32, size_t> pressures[12] = {
+		{In::PAD_RIGHT, 13}, {In::PAD_LEFT, 15}, {In::PAD_UP, 12}, {In::PAD_DOWN, 14},
+		{In::PAD_TRIANGLE, 4}, {In::PAD_CIRCLE, 5}, {In::PAD_CROSS, 6}, {In::PAD_SQUARE, 7},
+		{In::PAD_L1, 2}, {In::PAD_R1, 3}, {In::PAD_L2, 0}, {In::PAD_R2, 1}};
+	for (size_t i = 0; i < std::size(pressures); i++)
+		ds2[6 + i] = IsButtonBitSet(buttons, pressures[i].second) ? pad->GetPressure(pressures[i].first) : 0;
+	return 1;
+}
+
+// Same mapping as PadDualshock2::Poll: large motor 0-255, small motor on/off, each
+// scaled by the pad's vibration settings; SetPadVibrationIntensity takes large first.
+void be_pad_vibrate(int port, int small, int large)
+{
+	if (port < 0 || port > 1)
+		return;
+	PadBase* pad = Pad::GetPad(static_cast<u8>(port), 0);
+	if (!pad || pad->GetType() != Pad::ControllerType::DualShock2)
+		return;
+	const float l = (std::min)(static_cast<float>(std::clamp(large, 0, 255)) * pad->GetVibrationScale(1) * (1.0f / 255.0f), 1.0f);
+	const float s = (std::min)((small ? 1.0f : 0.0f) * pad->GetVibrationScale(0), 1.0f);
+	InputManager::SetPadVibrationIntensity(sioConvertPortAndSlotToPad(static_cast<u32>(port), 0), l, s);
 }
 
 int be_vu0_exec(vu0_state* st, uint32_t addr)

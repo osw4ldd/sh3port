@@ -108,6 +108,20 @@ void be_save_frame(const char *path);
 void be_shutdown(int code);               /* called just before process exit */
 int be_iop_lle(void);
 void be_report(void);                     /* timing statistics (trace mode) */
+/* Controller input for the HLE pad (hle_pad.c; host side = S1-T2).
+ * be_pad_read fills ds2[18] with the DualShock 2 report of `port` (0/1):
+ *   [0] bits 0-7 SELECT L3 R3 START UP RIGHT DOWN LEFT, [1] bits 0-7 L2 R2
+ *   L1 R1 TRIANGLE CIRCLE CROSS SQUARE (active low: 0 = pressed);
+ *   [2..5] right X, right Y, left X, left Y (0x80 centre, 0 = left/up);
+ *   [6..17] pressure RIGHT LEFT UP DOWN TRIANGLE CIRCLE CROSS SQUARE L1 R1
+ *   L2 R2 (0 = released, 0xFF = fully pressed).
+ * Returns 1 if a controller is connected on that port, else 0.  Called on
+ * the EE thread, about once per frame per port.
+ * be_pad_vibrate: small motor 0/1, large motor 0-255.
+ * Both are optional: if the backend does not define them, hle_pad.c's
+ * fallback (port 0 driven by PS2NATIVE_PRESS) is linked instead. */
+int be_pad_read(int port, uint8_t *ds2);
+void be_pad_vibrate(int port, int small, int large);
 
 /* VU0 register file exchanged with the backend for VCALLMS (micro mode).
  * Mirrored in host/NativeHost.h. */
@@ -134,6 +148,7 @@ PS2_NORETURN_PRE void kernel_exit(int code) PS2_NORETURN_POST;
 extern int kernel_in_handler;
 void kernel_idle_wait(void);
 int kernel_thread_id(void);
+uint64_t kernel_vblank_count(void);   /* vblanks since start (frame number) */
 void cop0_init(void);
 
 /* ------------------------------------------------------------ SIF / IOP HLE */

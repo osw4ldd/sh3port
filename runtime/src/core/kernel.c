@@ -338,6 +338,8 @@ double kernel_next_alarm(void)
 static uint64_t vblank_count;
 static int frame_dumped;
 
+uint64_t kernel_vblank_count(void) { return vblank_count; }
+
 static void apply_patches(void)
 {
     for (uint32_t i = 0; i < ps2_patch_count; i++) {

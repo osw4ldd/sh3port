@@ -486,7 +486,7 @@ void NativeHostMain::OnControllerChanged()
 	// Called from inside InputManager while input sources are (re)created, so
 	// the device list may not be usable yet: remap later on the CPU thread.
 	// Start-up mapping is done in CPUThreadMain.
-	if (!s_lle || !VMManager::HasValidVM())
+	if (!VMManager::HasValidVM())
 		return;
 	NativeHostMain::RunOnCPUThread([]() {
 		if (!VMManager::HasValidVM())
@@ -552,11 +552,12 @@ static void SettingsOverride()
 	}
 	else
 	{
-		// HLE IOP: no SPU2 audio stream, PCSX2 pads or memory cards.
+		// HLE IOP: no SPU2 audio stream or memory cards.  The PCSX2 pad object still
+		// takes the keyboard/controller bindings: hle_pad.c reads it through
+		// be_pad_read (NativeCpu.cpp) instead of the SIO2.
 		si.SetStringValue("SPU2/Output", "OutputModule", "nullout");
-		si.SetBoolValue("InputSources", "SDL", false);
-		si.SetBoolValue("InputSources", "XInput", false);
 		Pad::ClearPortBindings(si, 0);
+		SetKeyboardPadBindings(si);
 		for (u32 i = 0; i < 2; i++)
 		{
 			si.SetBoolValue("MemoryCards", fmt::format("Slot{}_Enable", i + 1).c_str(), false);
@@ -699,11 +700,10 @@ static void CPUThreadMain(std::atomic<int>* ret)
 	ret->store(EXIT_FAILURE);
 	if (VMManager::Internal::CPUThreadInitialize())
 	{
-		if (s_lle)
-		{
-			InputManager::ReloadDevices();
-			MapFirstController();
-		}
+		// Pad 1 bindings (keyboard + first controller): read by the real IOP's SIO2 in
+		// LLE mode and by be_pad_read for the HLE pad.
+		InputManager::ReloadDevices();
+		MapFirstController();
 		VMManager::ApplySettings();
 		if (!ps2_cfg.reference)
 			VMManager::SetNativeHostCPUs(&g_native_ee_cpu, s_lle ? nullptr : &g_native_iop_cpu);
