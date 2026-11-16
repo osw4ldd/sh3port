@@ -64,3 +64,8 @@ desktop.ini
 
 # Personal Claude Code settings
 .claude/settings.local.json
+
+# Agent team notes (kept locally, not published)
+.claude/agents/
+TEAM_PLAN.md
+CLAUDE.md
